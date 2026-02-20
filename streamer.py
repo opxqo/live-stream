@@ -259,11 +259,24 @@ class Streamer:
         valid_images = []
         for img in image_inputs:
             path = img.get("path", "")
-            if path and (path.startswith("http") or os.path.exists(path)):
+            if not path:
+                continue
+            if path.startswith("http"):
+                # 预检远程图片是否可达
+                try:
+                    resp = requests.head(path, timeout=3, allow_redirects=True)
+                    if resp.status_code < 400:
+                        cmd += ["-i", path]
+                        valid_images.append(img)
+                    else:
+                        log.warning("远程图片不可用 (HTTP %d): %s", resp.status_code, path)
+                except Exception as e:
+                    log.warning("远程图片不可达，已跳过: %s (%s)", path, e)
+            elif os.path.exists(path):
                 cmd += ["-i", path]
                 valid_images.append(img)
             else:
-                log.warning("Image not found or invalid URL: %s", path)
+                log.warning("图片文件不存在: %s", path)
 
         # 3. 滤镜链
         # [0:v] 缩放并填充黑边 -> [base]
@@ -310,7 +323,7 @@ class Streamer:
             "-flvflags", "no_duration_filesize", "-f", "flv", rtmp_url,
         ]
         
-        log.debug("FFmpeg CMD: %s", ' '.join(cmd)[:300])
+        log.info("FFmpeg CMD: %s", ' '.join(cmd)[:500])
         return cmd
 
     # ── 滤镜构建 ─────────────────────────────────
@@ -394,10 +407,12 @@ class Streamer:
     def _find_font() -> str | None:
         """查找支持中文的字体文件"""
         candidates = [
-            # Linux / Docker (优先)
+            # Linux / Docker (Debian: fonts-wqy-zenhei)
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy-zenhei/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             # Windows
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simsun.ttc",
@@ -458,7 +473,7 @@ class Streamer:
 
             # 关键日志输出
             if any(kw in text for kw in ("Error", "error", "Warning", "Opening", "Output", "Stream")):
-                log.debug("[ffmpeg] %s", text)
+                log.warning("[ffmpeg] %s", text)
 
     def _cleanup(self):
         """清理 FFmpeg 进程"""
