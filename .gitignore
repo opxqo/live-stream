@@ -12,3 +12,4 @@ progress.json
 venv/
 bili_debug_*.txt
 test_bili_api.py
+test_webdav.py

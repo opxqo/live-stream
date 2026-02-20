@@ -3,4 +3,12 @@ __pycache__
 .git
 .gitignore
 *.md
-台标.svg
+台标.*
+bilibili.js
+test_*.py
+bili_debug_*.txt
+docker-compose.yml
+progress.json
+users.json
+config.yaml
+.env

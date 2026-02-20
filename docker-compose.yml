@@ -9,3 +9,4 @@ services:
       - /opt/docker/live-stream/config.yaml:/app/config.yaml
       - /opt/docker/live-stream/台标.png:/app/台标.png
       - /opt/docker/live-stream/progress.json:/app/progress.json
+      - /opt/docker/live-stream/users.json:/app/users.json

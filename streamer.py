@@ -71,7 +71,7 @@ class Streamer:
         if not self._font_path:
             self._font_path = self._find_font()
             if self._font_path:
-                log.info(f"Using font: {self._font_path}")
+                log.info("Using font: %s", self._font_path)
             else:
                 log.warning("No font found! OSD might fail.")
 
@@ -263,7 +263,7 @@ class Streamer:
                 cmd += ["-i", path]
                 valid_images.append(img)
             else:
-                log.warning(f"Image not found or invalid URL: {path}")
+                log.warning("Image not found or invalid URL: %s", path)
 
         # 3. 滤镜链
         # [0:v] 缩放并填充黑边 -> [base]
@@ -310,7 +310,7 @@ class Streamer:
             "-flvflags", "no_duration_filesize", "-f", "flv", rtmp_url,
         ]
         
-        log.info(f"FFmpeg CMD: {' '.join(cmd)}")
+        log.debug("FFmpeg CMD: %s", ' '.join(cmd)[:300])
         return cmd
 
     # ── 滤镜构建 ─────────────────────────────────
@@ -394,14 +394,14 @@ class Streamer:
     def _find_font() -> str | None:
         """查找支持中文的字体文件"""
         candidates = [
-            "C:/Windows/Fonts/msyh.ttc",
-            "C:/Windows/Fonts/simsun.ttc",
-            "C:/Windows/Fonts/simhei.ttf",
-            "C:/Windows/Fonts/arial.ttf",
-            "C:/Windows/Fonts/simhei.ttf",
+            # Linux / Docker (优先)
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            # Windows
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simsun.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
         ]
         for path in candidates:
             if os.path.exists(path):
@@ -761,9 +761,6 @@ class Streamer:
     def _check_webdav(self) -> dict:
         """检查 WebDAV 视频源可用性"""
         name = "WebDAV 连接"
-        for src_cfg in self.resilience.get("_sources_cfg", []):
-            pass  # 不在 resilience 里
-        # 直接从 playlist sources 获取
         from sources.webdav import WebDAVSource
         for source in self.playlist.sources:
             if isinstance(source, WebDAVSource):
