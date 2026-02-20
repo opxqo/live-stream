@@ -10,3 +10,5 @@ progress.json
 .env
 .venv/
 venv/
+bili_debug_*.txt
+test_bili_api.py

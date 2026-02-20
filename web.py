@@ -341,11 +341,17 @@ LOGIN_HTML = """<!DOCTYPE html>
     justify-content: center;
   }
   .login-card {
-    width: 380px;
+    width: 90%;
+    max-width: 380px;
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 40px 32px;
+  }
+  @media (max-width: 480px) {
+    .login-card { padding: 28px 20px; }
+    .login-card h1 { font-size: 20px; }
+    .form-group input, .btn-primary { height: 44px; font-size: 15px; }
   }
   .login-card h1 {
     font-size: 24px;
@@ -1024,6 +1030,91 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     border-color: var(--primary);
     color: var(--primary);
     background: hsla(222, 47%, 50%, 0.08);
+  }
+
+  /* ── 移动端适配 ── */
+  @media (max-width: 640px) {
+    /* 顶栏 */
+    .topbar { padding: 0 10px; height: 48px; }
+    .topbar-left { font-size: 14px; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .topbar-right { gap: 6px; flex-shrink: 0; }
+    .user-info { gap: 4px; font-size: 11px; }
+    .user-info > #uName { display: none; }
+    .user-avatar { width: 24px; height: 24px; font-size: 10px; }
+    .role-badge { font-size: 10px; padding: 2px 6px; }
+    .btn-ghost { padding: 4px 8px; font-size: 11px; }
+
+    /* 主容器 */
+    .main-wrap { padding: 12px 10px; }
+
+    /* 卡片 */
+    .card { padding: 14px; margin-bottom: 12px; }
+    .card-title { font-size: 13px; margin-bottom: 10px; }
+
+    /* 状态行 */
+    .status-row { font-size: 13px; padding: 6px 0; flex-wrap: wrap; gap: 4px; }
+    .status-value { max-width: 100%; font-size: 13px; }
+
+    /* 监控卡片 */
+    .monitor-grid { grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .monitor-card { padding: 10px 4px; overflow: hidden; }
+    .monitor-label { font-size: 11px; margin-bottom: 4px; }
+    .monitor-value { font-size: 14px; word-break: break-all; }
+
+    /* 操作按钮 */
+    .actions { gap: 6px; margin-bottom: 14px; }
+    .btn { height: 42px; font-size: 13px; border-radius: 8px; }
+
+    /* Tab 导航 */
+    .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab-btn { padding: 8px 14px; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+
+    /* 播放列表 / 目录 */
+    .ep-item, .dir-item { padding: 12px 10px; font-size: 13px; min-height: 44px; }
+    .ep-num { min-width: 24px; font-size: 11px; }
+    .dir-action { padding: 6px 10px; font-size: 11px; }
+    .playlist, .dir-list { max-height: 320px; }
+
+    /* 画面设置表单 */
+    .form-grid { grid-template-columns: 1fr; gap: 10px; }
+    .form-section-title { font-size: 13px; }
+    .form-group-sm input, .form-group-sm select { height: 40px; font-size: 14px; }
+    .preview-header { flex-direction: column; align-items: flex-start; gap: 4px; }
+    .preview-hint { font-size: 10px; }
+    .save-bar { flex-direction: column; }
+    .save-bar .btn { width: 100%; }
+
+    /* 图片/文字叠加 */
+    .overlay-item { padding: 10px; }
+    .btn-outline { height: 40px; font-size: 13px; }
+
+    /* 用户管理 */
+    .add-user-form { flex-direction: column; gap: 8px; }
+    .add-user-form input { height: 40px; font-size: 14px; }
+    .btn-add { height: 40px; width: 100%; }
+    .user-table { font-size: 13px; }
+    .user-table th, .user-table td { padding: 8px 10px; }
+
+    /* Toast */
+    .toast { top: auto; bottom: 20px; right: 50%; transform: translateX(50%); max-width: 85vw; text-align: center; }
+    .toast.show { opacity: 1; }
+
+    /* 上传区域 */
+    .upload-area { padding: 14px; font-size: 12px; }
+    .breadcrumb { font-size: 12px; padding: 8px 10px; }
+
+    /* 颜色/位置预设 */
+    .color-dot { width: 26px; height: 26px; }
+    .pos-btn { padding: 5px 10px; font-size: 11px; }
+  }
+
+  @media (max-width: 360px) {
+    .topbar-left { font-size: 13px; }
+    .monitor-grid { grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+    .monitor-value { font-size: 14px; }
+    .actions { flex-direction: column; }
+    .btn { width: 100%; }
   }
 </style>
 </head>

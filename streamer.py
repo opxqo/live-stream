@@ -14,6 +14,8 @@ from email.mime.text import MIMEText
 from urllib.parse import urlparse
 
 import psutil
+import requests
+import yaml
 
 from playlist import Playlist
 
@@ -55,6 +57,9 @@ class Streamer:
         self.progress: float = 0.0       # 播放进度 0~100
         self.bitrate: str = ""           # 推流码率
         self.speed: str = ""             # 编码速度
+        
+        # B站API相关配置缓存
+        self._bili_cfg = config.get("bilibili", {})
 
     # ── 公共 API ──────────────────────────────────
 
@@ -495,13 +500,173 @@ class Streamer:
         html = self._format_report_html(report)
         self._notify_email("🔍 推流自检报告", html, is_html=True)
 
-        # 如果 RTMP 连接和推流码都失败，建议停止
+        # 如果 RTMP 连接和推流码都失败，或直播间未开播，尝试自动重新获取推流码并开播
         rtmp_ok = next((c["ok"] for c in report["checks"] if c["id"] == "rtmp"), True)
         key_ok = next((c["ok"] for c in report["checks"] if c["id"] == "stream_key"), True)
-        if not rtmp_ok or not key_ok:
-            log.error("⛔ RTMP 连接或推流码异常，建议停止推流")
-            return True
+        live_ok = next((c["ok"] for c in report["checks"] if c["id"] == "live_status"), True)
+        
+        if not rtmp_ok or not key_ok or not live_ok:
+            reason_parts = []
+            if not rtmp_ok: reason_parts.append("RTMP不可达")
+            if not key_ok: reason_parts.append("推流码异常")
+            if not live_ok: reason_parts.append("直播间未开播")
+            log.error("⛔ %s，准备尝试依靠后台自动重新开播...", "、".join(reason_parts))
+            if self._bili_cfg and self._bili_cfg.get("cookie"):
+                reconnect_success = self._attempt_auto_restart()
+                if reconnect_success:
+                    log.info("✅ 后台自动重新开播成功！推流程序将继续。")
+                    return False # 重新开播成功，不停止主循环推流
+                else:
+                    log.error("⛔ 自动重新开播失败，建议彻底停止推流")
+                    return True
+            else:
+                log.error("⛔ 自动开播失败：未在 config.yaml 发现有效的 bilibili 配置")
+                return True
+                
         return False
+
+    def _attempt_auto_restart(self) -> bool:
+        """尝试使用 B 站 API 获取新的推流码进行恢复"""
+        room_id = self._bili_cfg.get("room_id")
+        area_id = self._bili_cfg.get("area_id")
+        cookie_str = self._bili_cfg.get("cookie", "")
+        
+        match = re.search(r"bili_jct=([^;]+)", cookie_str)
+        if not match:
+            log.error("Cookie 中未找到 bili_jct (csrf_token)")
+            return False
+        csrf = match.group(1)
+        
+        url = "https://api.live.bilibili.com/room/v1/Room/startLive"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Cookie": cookie_str,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            "Origin": "https://link.bilibili.com",
+            "Referer": "https://link.bilibili.com/p/center/index"
+        }
+        
+        data = {
+            "room_id": room_id,
+            "platform": "pc_link",
+            "area_v2": area_id,
+            "backup_stream": "0",
+            "csrf_token": csrf,
+            "csrf": csrf
+        }
+        
+        log.info("🔄 正在请求 B 站开启直播...")
+        try:
+            resp = requests.post(url, headers=headers, data=data, timeout=10)
+            resp_json = resp.json()
+            
+            # code 0 直接成功
+            if resp_json.get("code") == 0:
+                return self._apply_new_stream_config(resp_json)
+                
+            # code 60024 需要人脸认证
+            elif resp_json.get("code") == 60024 or (resp_json.get("data") and resp_json["data"].get("qr")):
+                qr_url = resp_json["data"].get("qr", "")
+                log.warning("⚠️ 目标分区需要人脸认证，请查收邮件并扫码")
+                
+                # 发送邮件通知附带二维码地址
+                qr_html = f'''
+                <div style="background:#fff;padding:20px;border-radius:8px;text-align:center">
+                    <h2 style="color:#fb7299">系统触发了重新开播，但需要进行人脸认证</h2>
+                    <p style="color:#666">请用手机浏览器的扫一扫或者 B 站 APP 扫描并在手机端完成认证：</p>
+                    <div style="margin:20px 0;">
+                        <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(qr_url)}" alt="二维码" />
+                    </div>
+                    <p style="color:#999;font-size:12px;">如果无法显示图片，请直接复制这串链接去浏览器打开获取最新认证二维码：<br>{qr_url}</p>
+                </div>
+                '''
+                self._notify_email("⚠️ 直播推流断线: 待人脸认证恢复", qr_html, is_html=True)
+                
+                # 轮询人脸认证状态
+                face_auth_url = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/IsUserIdentifiedByFaceAuth"
+                face_auth_data = {
+                    "room_id": room_id,
+                    "face_auth_code": "60024",
+                    "csrf_token": csrf,
+                    "csrf": csrf,
+                    "visit_id": ""
+                }
+                
+                is_verified = False
+                max_attempts = 120 # 允许最多等待 120 秒，给你留出看邮件的时间
+                attempts = 0
+                
+                log.info("⏳ 开始轮询人脸认证结果 (超时时间 120 秒)...")
+                while not is_verified and attempts < max_attempts:
+                    if not self._running:
+                        return False # 如果用户手动点击了关闭就提前终止
+                        
+                    try:
+                        auth_resp = requests.post(face_auth_url, headers=headers, data=face_auth_data, timeout=5)
+                        auth_json = auth_resp.json()
+                        if auth_json.get("code") == 0 and auth_json.get("data", {}).get("is_identified"):
+                            log.info("✅ 检测到扫码人脸验证成功！继续开播流程")
+                            is_verified = True
+                            break
+                    except Exception as e:
+                        pass
+                    
+                    time.sleep(1)
+                    attempts += 1
+                    
+                if is_verified:
+                    # 重新调用 startLive
+                    log.info("🔄 再次请求 B 站开启直播...")
+                    resp2 = requests.post(url, headers=headers, data=data, timeout=10)
+                    resp_json2 = resp2.json()
+                    
+                    if resp_json2.get("code") == 0:
+                        self._notify_email("✅ 直播推流断线并重新开播成功", "系统检测到人脸验证通过，已成功获取到新的推流码，进程将自动恢复推流！", is_html=False)
+                        return self._apply_new_stream_config(resp_json2)
+                    else:
+                        log.error(f"❌ 二次开播依然失败: {resp_json2}")
+                        return False
+                else:
+                    log.error("❌ 人脸扫描验证超时，重连宣告失败")
+                    return False
+            else:
+                log.error(f"❌ 开播请求失败: {resp_json}")
+                return False
+                
+        except Exception as e:
+            log.error(f"自动重连过程遇到错误: {e}")
+            return False
+            
+    def _apply_new_stream_config(self, resp_json: dict) -> bool:
+        """解析新的推流地址并热更到配置"""
+        data = resp_json.get("data", {})
+        rtmp_url = data.get("rtmp", {}).get("addr", "")
+        rtmp_code = data.get("rtmp", {}).get("code", "")
+        
+        if not rtmp_url or not rtmp_code:
+            return False
+            
+        with self._lock:
+            # 内部更新缓存的 stream 项属性
+            self.stream_cfg["rtmp_url"] = rtmp_url
+            self.stream_cfg["stream_key"] = rtmp_code
+            
+        # 并将其写入 config.yaml 文件持久化
+        try:
+            with open("config.yaml", "r", encoding="utf-8") as f:
+                full_config = yaml.safe_load(f)
+                
+            full_config["stream"]["rtmp_url"] = rtmp_url
+            full_config["stream"]["stream_key"] = rtmp_code
+            
+            with open("config.yaml", "w", encoding="utf-8") as f:
+                yaml.dump(full_config, f, allow_unicode=True, sort_keys=False)
+                
+            log.info(f"✅ 新的推流地址已更新并保存在 config.yaml。")
+            return True
+        except Exception as e:
+            log.error(f"❌ 写入 config.yaml 数据失败，但已暂时在内存中更新: {e}")
+            return True
 
     def _run_diagnosis(self) -> dict:
         """执行全部自检项目"""
@@ -510,6 +675,7 @@ class Streamer:
         checks.append(self._check_dns())
         checks.append(self._check_rtmp())
         checks.append(self._check_stream_key())
+        checks.append(self._check_live_status())
         checks.append(self._check_webdav())
         checks.append(self._check_system())
         return {"checks": checks}
@@ -571,6 +737,26 @@ class Streamer:
             return {"id": "stream_key", "name": name, "ok": False, "detail": "推送超时（15 秒）"}
         except Exception as e:
             return {"id": "stream_key", "name": name, "ok": False, "detail": f"异常: {e}"}
+
+    def _check_live_status(self) -> dict:
+        """通过 B 站 API 检查直播间是否正在直播"""
+        name = "直播间状态"
+        room_id = self._bili_cfg.get("room_id") if self._bili_cfg else None
+        if not room_id:
+            return {"id": "live_status", "name": name, "ok": True, "detail": "未配置 room_id，跳过"}
+        try:
+            url = f"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room_id}"
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            if data.get("code") != 0:
+                return {"id": "live_status", "name": name, "ok": False, "detail": f"API 返回错误: {data.get('message', '未知')}"}
+            live_status = data.get("data", {}).get("live_status", 0)
+            if live_status == 1:
+                return {"id": "live_status", "name": name, "ok": True, "detail": f"房间 {room_id} 正在直播中"}
+            else:
+                return {"id": "live_status", "name": name, "ok": False, "detail": f"房间 {room_id} 未在直播 (status={live_status})"}
+        except Exception as e:
+            return {"id": "live_status", "name": name, "ok": False, "detail": f"查询失败: {e}"}
 
     def _check_webdav(self) -> dict:
         """检查 WebDAV 视频源可用性"""
