@@ -1,0 +1,11 @@
+services:
+  live-stream:
+    image: 192.168.1.11:5000/live-stream:latest
+    container_name: live-stream
+    restart: always
+    ports:
+      - "8088:8088"
+    volumes:
+      - /opt/docker/live-stream/config.yaml:/app/config.yaml
+      - /opt/docker/live-stream/台标.png:/app/台标.png
+      - /opt/docker/live-stream/progress.json:/app/progress.json

@@ -1,0 +1,7 @@
+webdav4[http]
+pyyaml
+fastapi
+uvicorn
+psutil
+python-multipart
+pyjwt

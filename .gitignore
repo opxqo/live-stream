@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+config.yaml
+users.json
+progress.json
+*.png
+*.jpg
+*.jpeg
+*.gif
+.env
+.venv/
+venv/
