@@ -53,10 +53,11 @@ class Streamer:
 
         # FFmpeg 实时指标
         self.duration: float = 0.0       # 视频总时长（秒）
-        self.current_time: float = 0.0   # 当前播放位置（秒）
+        self.current_time: float = 0.0   # 当前播放位置（秒，绝对时间）
         self.progress: float = 0.0       # 播放进度 0~100
         self.bitrate: str = ""           # 推流码率
         self.speed: str = ""             # 编码速度
+        self._seek_offset: float = 0.0   # -ss 跳转偏移量
         
         # B站API相关配置缓存
         self._bili_cfg = config.get("bilibili", {})
@@ -98,6 +99,8 @@ class Streamer:
                 continue
 
             video_retry = 0
+            # 首次播放该视频时检查是否有断点续播位置
+            resume_pos = self.playlist.consume_resume_position()
             while self._running:
                 with self._lock:
                     self.current_video = video.name
@@ -106,8 +109,13 @@ class Streamer:
                     self.progress = 0.0
                     self.bitrate = ""
                     self.speed = ""
-                log.info("▶ 正在播放: %s", video.name)
-                cmd = self._build_ffmpeg_cmd(video.ffmpeg_input, video.headers, video.name)
+                if resume_pos > 0:
+                    log.info("▶ 正在播放: %s (从 %.1f 秒续播)", video.name, resume_pos)
+                else:
+                    log.info("▶ 正在播放: %s", video.name)
+                with self._lock:
+                    self._seek_offset = resume_pos
+                cmd = self._build_ffmpeg_cmd(video.ffmpeg_input, video.headers, video.name, seek_position=resume_pos)
 
                 try:
                     self._process = subprocess.Popen(
@@ -133,8 +141,13 @@ class Streamer:
 
                     video_retry += 1
                     self._total_failures += 1
-                    log.warning("✗ FFmpeg 异常退出 (code=%d)，第 %d 次重试 (累计 %d 次)",
-                                returncode, video_retry, self._total_failures)
+
+                    # 立即将当前秒数写入 progress.json，确保断点精确
+                    with self._lock:
+                        resume_pos = self.current_time
+                    self.playlist.save_progress_with_position(resume_pos)
+                    log.warning("✗ FFmpeg 异常退出 (code=%d)，第 %d 次重试，将从 %.1f 秒续播",
+                                returncode, video_retry, resume_pos)
 
                     if max_retries > 0 and self._total_failures >= max_retries:
                         log.error("达到最大重试次数 (%d)，运行自检后停止推流", max_retries)
@@ -142,17 +155,12 @@ class Streamer:
                         self._running = False
                         break
 
-                    # 连续 3 次失败 → 自检 + 跳过
-                    if video_retry >= 3:
-                        log.warning("%s 连续失败 3 次，运行自检后跳到下一个视频", video.name)
-                        should_stop = self._trigger_diagnosis(video.name, f"连续失败 {video_retry} 次")
+                    # 累计 5 次失败 → 自检（不停止，继续重试当前视频）
+                    if self._total_failures >= 5 and self._total_failures % 5 == 0:
+                        should_stop = self._trigger_diagnosis(video.name, f"累计失败 {self._total_failures} 次")
                         if should_stop:
                             self._running = False
-                        break
-
-                    # 累计 5 次失败 → 自检（不停止，仅报告）
-                    if self._total_failures >= 5 and self._total_failures % 5 == 0:
-                        self._trigger_diagnosis(video.name, f"累计失败 {self._total_failures} 次")
+                            break
 
                     # 指数退避：base * 2^(retry-1)，上限 max_delay
                     delay = min(base_delay * (2 ** (video_retry - 1)), max_delay)
@@ -162,7 +170,9 @@ class Streamer:
                 except Exception as e:
                     log.exception("推流异常: %s", e)
                     self._total_failures += 1
-                    self._trigger_diagnosis(video.name, f"推流异常: {e}")
+                    with self._lock:
+                        resume_pos = self.current_time
+                    self.playlist.save_progress_with_position(resume_pos)
                     time.sleep(base_delay)
 
         with self._lock:
@@ -235,7 +245,7 @@ class Streamer:
 
     # ── FFmpeg 命令构建 ───────────────────────────
 
-    def _build_ffmpeg_cmd(self, input_path: str, headers: dict | None = None, video_name: str = "") -> list[str]:
+    def _build_ffmpeg_cmd(self, input_path: str, headers: dict | None = None, video_name: str = "", seek_position: float = 0.0) -> list[str]:
         """构建 FFmpeg 推流命令"""
         rtmp_url = self.stream_cfg["rtmp_url"] + self.stream_cfg["stream_key"]
         v = self.video_cfg
@@ -244,9 +254,11 @@ class Streamer:
         
         cmd = ["ffmpeg", "-y"]
 
-        # 1. 主视频输入
+        # 1. 主视频输入（如有断点续播位置，在 -i 前加 -ss）
         if headers and "Authorization" in headers:
             cmd += ["-headers", f"Authorization: {headers['Authorization']}\r\n"]
+        if seek_position > 0:
+            cmd += ["-ss", f"{seek_position:.1f}"]
         cmd += ["-re", "-i", input_path]
 
         # 2. 收集图片输入 (Logo + Images)
@@ -433,6 +445,7 @@ class Streamer:
         """读取 FFmpeg 输出，解析进度和码率"""
         if not self._process or not self._process.stdout:
             return
+        last_progress_save = time.time()
         for line in self._process.stdout:
             if not self._running:
                 break
@@ -450,14 +463,22 @@ class Streamer:
             # 解析当前播放位置
             m = self._RE_PROGRESS.search(text)
             if m:
-                current = (
+                relative_time = (
                     int(m.group(1)) * 3600 + int(m.group(2)) * 60
                     + int(m.group(3)) + int(m.group(4)) / 100
                 )
                 with self._lock:
+                    # 加上 seek 偏移量，得到视频绝对时间
+                    current = self._seek_offset + relative_time
                     self.current_time = current
                     if self.duration > 0:
                         self.progress = min(current / self.duration * 100, 100)
+
+                # 每 10 秒保存一次秒级进度
+                now = time.time()
+                if now - last_progress_save >= 10:
+                    self.playlist.save_progress_with_position(current)
+                    last_progress_save = now
 
             # 解析推流码率
             m = self._RE_BITRATE.search(text)

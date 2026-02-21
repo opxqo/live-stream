@@ -20,6 +20,7 @@ class Playlist:
         self._videos: list[VideoItem] = []
         self._index = 0
         self._lock = threading.Lock()
+        self._resume_position: float = 0.0  # 恢复播放的秒数
         self.reload()
 
     def reload(self):
@@ -103,7 +104,19 @@ class Playlist:
 
     # ── 进度持久化 ─────────────────────────────────
 
-    def _save_progress(self):
+    def consume_resume_position(self) -> float:
+        """获取并清除恢复播放位置（秒），只消费一次"""
+        with self._lock:
+            pos = self._resume_position
+            self._resume_position = 0.0
+            return pos
+
+    def save_progress_with_position(self, position: float):
+        """保存带秒级位置的播放进度（供外部 streamer 调用）"""
+        with self._lock:
+            self._save_progress(position=position)
+
+    def _save_progress(self, position: float = 0.0):
         """保存当前播放进度（在锁内调用）"""
         if not self._videos:
             return
@@ -111,6 +124,7 @@ class Playlist:
             data = {
                 "index": self._index,
                 "video_name": self._videos[self._index - 1].name if self._index > 0 else "",
+                "position": round(position, 1),
             }
             PROGRESS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
@@ -124,18 +138,21 @@ class Playlist:
             data = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
             saved_index = data.get("index", 0)
             saved_name = data.get("video_name", "")
+            saved_position = data.get("position", 0.0)
 
             with self._lock:
                 # 优先按视频名匹配（防止列表顺序变化）
                 for i, v in enumerate(self._videos):
                     if v.name == saved_name:
                         self._index = i
-                        log.info("▶ 从进度恢复: %s (第 %d 个)", saved_name, i + 1)
+                        self._resume_position = saved_position
+                        log.info("▶ 从进度恢复: %s (第 %d 个, 位置 %.1f 秒)", saved_name, i + 1, saved_position)
                         return
 
                 # 名称未匹配到，尝试用索引恢复
                 if 0 <= saved_index < len(self._videos):
                     self._index = saved_index
-                    log.info("▶ 从进度恢复: 索引 %d", saved_index)
+                    self._resume_position = saved_position
+                    log.info("▶ 从进度恢复: 索引 %d (位置 %.1f 秒)", saved_index, saved_position)
         except Exception as e:
             log.warning("恢复进度失败: %s", e)
