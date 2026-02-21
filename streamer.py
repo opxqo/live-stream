@@ -35,7 +35,9 @@ class Streamer:
         self.resilience = config.get("resilience", {})
         self.email_cfg = config.get("email", {})
 
-        self._process: subprocess.Popen | None = None
+        self._process: subprocess.Popen | None = None  # 当前解码器进程
+        self._pusher_process: subprocess.Popen | None = None  # 持久推流进程
+        self._pipe_thread: threading.Thread | None = None  # 管道传输线程
         self._running = False
         self._skip_requested = False  # 用户主动跳过/点播标志
         self._thread: threading.Thread | None = None
@@ -91,7 +93,15 @@ class Streamer:
 
         self._notify_email("🟢 推流服务已启动", f"视频总数: {self.playlist.total}")
 
+        # 启动持久推流器（RTMP 连接一直在线）
+        self._start_pusher()
+
         while self._running:
+            # 检查推流器是否存活，死了则重启
+            if self._pusher_process is None or self._pusher_process.poll() is not None:
+                log.warning("推流器进程已退出，重新启动...")
+                self._start_pusher()
+
             video = self.playlist.next()
             if not video:
                 log.warning("无可用视频，%d 秒后重试...", base_delay)
@@ -115,16 +125,22 @@ class Streamer:
                     log.info("▶ 正在播放: %s", video.name)
                 with self._lock:
                     self._seek_offset = resume_pos
-                cmd = self._build_ffmpeg_cmd(video.ffmpeg_input, video.headers, video.name, seek_position=resume_pos)
+                cmd = self._build_decoder_cmd(video.ffmpeg_input, video.headers, video.name, seek_position=resume_pos)
 
                 try:
+                    # 解码器：stdout 输出 MPEG-TS 数据，stderr 输出进度日志
                     self._process = subprocess.Popen(
                         cmd,
                         stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
+                        stderr=subprocess.PIPE,
                     )
+                    # 启动管道线程：解码器 stdout → 推流器 stdin
+                    self._pipe_thread = threading.Thread(target=self._pipe_data, daemon=True)
+                    self._pipe_thread.start()
+                    # 从解码器 stderr 读取进度
                     self._read_output()
                     returncode = self._process.wait()
+                    self._pipe_thread.join(timeout=5)
 
                     # 用户主动跳过/点播，直接跳出重试
                     if self._skip_requested:
@@ -146,7 +162,7 @@ class Streamer:
                     with self._lock:
                         resume_pos = self.current_time
                     self.playlist.save_progress_with_position(resume_pos)
-                    log.warning("✗ FFmpeg 异常退出 (code=%d)，第 %d 次重试，将从 %.1f 秒续播",
+                    log.warning("✗ 解码器异常退出 (code=%d)，第 %d 次重试，将从 %.1f 秒续播",
                                 returncode, video_retry, resume_pos)
 
                     if max_retries > 0 and self._total_failures >= max_retries:
@@ -245,9 +261,8 @@ class Streamer:
 
     # ── FFmpeg 命令构建 ───────────────────────────
 
-    def _build_ffmpeg_cmd(self, input_path: str, headers: dict | None = None, video_name: str = "", seek_position: float = 0.0) -> list[str]:
-        """构建 FFmpeg 推流命令"""
-        rtmp_url = self.stream_cfg["rtmp_url"] + self.stream_cfg["stream_key"]
+    def _build_decoder_cmd(self, input_path: str, headers: dict | None = None, video_name: str = "", seek_position: float = 0.0) -> list[str]:
+        """构建解码器 FFmpeg 命令（输出 MPEG-TS 到 stdout）"""
         v = self.video_cfg
         a = self.audio_cfg
         w, h = v.get("width", 1920), v.get("height", 1080)
@@ -332,11 +347,24 @@ class Streamer:
             "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{int(bitrate.replace('k', '')) * 2}k",
             "-r", str(fps), "-g", str(fps * 2), "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", a.get("bitrate", "192k"), "-ar", str(a.get("sample_rate", 44100)), "-ac", str(a.get("channels", 2)),
-            "-flvflags", "no_duration_filesize", "-f", "flv", rtmp_url,
+            "-mpegts_flags", "resend_headers",
+            "-f", "mpegts", "pipe:1",
         ]
         
-        log.info("FFmpeg CMD: %s", ' '.join(cmd)[:500])
+        log.info("解码器 CMD: %s", ' '.join(cmd)[:500])
         return cmd
+
+    def _build_pusher_cmd(self) -> list[str]:
+        """构建持久推流器命令（从 stdin 读 MPEG-TS，推 FLV 到 RTMP）"""
+        rtmp_url = self.stream_cfg["rtmp_url"] + self.stream_cfg["stream_key"]
+        return [
+            "ffmpeg", "-y",
+            "-fflags", "+genpts+discardcorrupt",
+            "-f", "mpegts", "-i", "pipe:0",
+            "-c", "copy",
+            "-flvflags", "no_duration_filesize",
+            "-f", "flv", rtmp_url,
+        ]
 
     # ── 滤镜构建 ─────────────────────────────────
 
@@ -441,12 +469,69 @@ class Streamer:
     _RE_BITRATE = re.compile(r"bitrate=\s*([\d.]+\s*kbits/s)")
     _RE_SPEED = re.compile(r"speed=\s*([\d.]+x)")
 
+    def _start_pusher(self):
+        """启动持久推流器进程"""
+        cmd = self._build_pusher_cmd()
+        log.info("启动推流器: %s", ' '.join(cmd)[:300])
+        self._pusher_process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        # 后台读取推流器日志
+        threading.Thread(target=self._read_pusher_output, daemon=True).start()
+
+    def _restart_pusher(self):
+        """重启推流器（推流码变更时调用）"""
+        log.info("🔄 重启推流器...")
+        if self._pusher_process and self._pusher_process.poll() is None:
+            try:
+                self._pusher_process.stdin.close()
+            except Exception:
+                pass
+            self._pusher_process.terminate()
+            try:
+                self._pusher_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._pusher_process.kill()
+        self._start_pusher()
+
+    def _pipe_data(self):
+        """将解码器 stdout 管道传送到推流器 stdin"""
+        try:
+            while True:
+                chunk = self._process.stdout.read(65536)
+                if not chunk:
+                    break
+                if self._pusher_process and self._pusher_process.poll() is None:
+                    try:
+                        self._pusher_process.stdin.write(chunk)
+                        self._pusher_process.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        log.error("推流管道断开")
+                        break
+        except Exception as e:
+            log.warning("管道传输异常: %s", e)
+
+    def _read_pusher_output(self):
+        """后台读取推流器进程输出"""
+        if not self._pusher_process or not self._pusher_process.stdout:
+            return
+        try:
+            for line in self._pusher_process.stdout:
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    log.info("[推流器] %s", text)
+        except Exception:
+            pass
+
     def _read_output(self):
-        """读取 FFmpeg 输出，解析进度和码率"""
-        if not self._process or not self._process.stdout:
+        """读取解码器 stderr，解析进度和码率"""
+        if not self._process or not self._process.stderr:
             return
         last_progress_save = time.time()
-        for line in self._process.stdout:
+        for line in self._process.stderr:
             if not self._running:
                 break
             text = line.decode("utf-8", errors="replace").strip()
@@ -494,17 +579,30 @@ class Streamer:
 
             # 关键日志输出
             if any(kw in text for kw in ("Error", "error", "Warning", "Opening", "Output", "Stream")):
-                log.warning("[ffmpeg] %s", text)
+                log.warning("[解码器] %s", text)
 
     def _cleanup(self):
-        """清理 FFmpeg 进程"""
+        """清理解码器和推流器进程"""
+        # 终止解码器
         if self._process and self._process.poll() is None:
             self._process.terminate()
             try:
                 self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._process.kill()
-            log.info("FFmpeg 进程已终止")
+            log.info("解码器进程已终止")
+        # 终止推流器
+        if self._pusher_process and self._pusher_process.poll() is None:
+            try:
+                self._pusher_process.stdin.close()
+            except Exception:
+                pass
+            self._pusher_process.terminate()
+            try:
+                self._pusher_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._pusher_process.kill()
+            log.info("推流器进程已终止")
 
     # ── 自检程序 ──────────────────────────────────
 
@@ -699,9 +797,12 @@ class Streamer:
                 yaml.dump(full_config, f, allow_unicode=True, sort_keys=False)
                 
             log.info(f"✅ 新的推流地址已更新并保存在 config.yaml。")
+            # 重启推流器以使用新的 RTMP 地址
+            self._restart_pusher()
             return True
         except Exception as e:
             log.error(f"❌ 写入 config.yaml 数据失败，但已暂时在内存中更新: {e}")
+            self._restart_pusher()
             return True
 
     def _run_diagnosis(self) -> dict:
