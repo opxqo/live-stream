@@ -18,6 +18,7 @@ import requests
 import yaml
 
 from playlist import Playlist
+from bilibili_api import BilibiliAPI
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,30 @@ class Streamer:
         log.info("=" * 50)
 
         self._notify_email("🟢 推流服务已启动", f"视频总数: {self.playlist.total}")
+
+        # === 新增：自动获取 B 站推流码与开播 ===
+        bili_cookie = self._bili_cfg.get("cookie")
+        bili_room = self._bili_cfg.get("room_id")
+        if bili_cookie and bili_room:
+            log.info("检测到 B 站 Cookie，正在自动请求开播...")
+            bili_api = BilibiliAPI(bili_room, bili_cookie)
+            ok, url, code, msg = bili_api.start_live()
+            if ok and url and code:
+                with self._lock:
+                    self.stream_cfg["rtmp_url"] = url
+                    self.stream_cfg["stream_key"] = code
+                log.info("获取最新推流码成功，正在同步 config.yaml")
+                try:
+                    with open("config.yaml", "r", encoding="utf-8") as f:
+                        fc = yaml.safe_load(f)
+                    fc["stream"]["rtmp_url"] = url
+                    fc["stream"]["stream_key"] = code
+                    with open("config.yaml", "w", encoding="utf-8") as f:
+                        yaml.dump(fc, f, allow_unicode=True, sort_keys=False)
+                except Exception as e:
+                    log.warning("写入 config.yaml 异常: %s", e)
+            else:
+                log.warning("自动开播失败，回退使用最近一次推流配置。原因: %s", msg)
 
         # 启动持久推流器（RTMP 连接一直在线）
         self._start_pusher()
@@ -224,6 +249,17 @@ class Streamer:
         """停止推流"""
         self._running = False
         self._cleanup()
+
+        # === 新增：全面关播 ===
+        bili_cookie = self._bili_cfg.get("cookie")
+        bili_room = self._bili_cfg.get("room_id")
+        if bili_cookie and bili_room:
+            try:
+                log.info("停止推流，尝试向 B 站发送关播请求...")
+                bili_api = BilibiliAPI(bili_room, bili_cookie)
+                bili_api.stop_live()
+            except Exception as e:
+                log.warning("自动关播异常: %s", e)
 
     @property
     def is_running(self) -> bool:
