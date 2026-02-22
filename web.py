@@ -6,8 +6,9 @@ import shutil
 import time
 
 import yaml
-from fastapi import FastAPI, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import FastAPI, Request, UploadFile, File, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
+from fastapi.security import APIKeyCookie
 
 from sources.webdav import WebDAVSource
 import auth
@@ -29,36 +30,38 @@ def init_app(streamer, config=None, config_path="config.yaml"):
     _config_path = config_path
 
 
-# ── 认证辅助 ──
+# ── 认证辅助 (Depends 注入) ──
 
-def _get_user(request: Request) -> dict | None:
-    token = request.cookies.get("token")
+cookie_scheme = APIKeyCookie(name="token", auto_error=False)
+
+def get_current_user(token: str = Depends(cookie_scheme)) -> dict:
     if not token:
-        return None
-    return auth.verify_token(token)
+        raise HTTPException(status_code=401, detail="未登录")
+    user = auth.verify_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="凭证无效，请重新登录")
+    return user
 
 
-def _require_admin(request: Request) -> dict | None:
-    """返回用户信息，若非 admin 则返回 None"""
-    user = _get_user(request)
-    if user and user["role"] == "admin":
-        return user
-    return None
+def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="无权限：仅管理员可访问")
+    return user
 
 
 # ── 页面路由 ──
 
-@app.get("/login", response_class=HTMLResponse)
+@app.get("/login", response_class=FileResponse)
 async def login_page():
-    return LOGIN_HTML
+    return FileResponse("templates/login.html", media_type="text/html")
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=FileResponse)
 async def index(request: Request):
-    user = _get_user(request)
-    if not user:
+    token = request.cookies.get("token")
+    if not token or not auth.verify_token(token):
         return RedirectResponse("/login", status_code=302)
-    return DASHBOARD_HTML
+    return FileResponse("templates/dashboard.html", media_type="text/html")
 
 
 # ── 认证 API ──
@@ -86,26 +89,19 @@ async def api_logout():
 
 
 @app.get("/api/me")
-async def api_me(request: Request):
-    user = _get_user(request)
-    if not user:
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def api_me(user: dict = Depends(get_current_user)):
     return user
 
 
 # ── 用户管理 API（仅 admin） ──
 
 @app.get("/api/users")
-async def api_list_users(request: Request):
-    if not _require_admin(request):
-        return JSONResponse({"error": "无权限"}, status_code=403)
+async def api_list_users(admin: dict = Depends(require_admin)):
     return auth.list_users()
 
 
 @app.post("/api/users")
-async def api_add_user(request: Request):
-    if not _require_admin(request):
-        return JSONResponse({"error": "无权限"}, status_code=403)
+async def api_add_user(request: Request, admin: dict = Depends(require_admin)):
     body = await request.json()
     username = body.get("username", "").strip()
     password = body.get("password", "").strip()
@@ -116,9 +112,7 @@ async def api_add_user(request: Request):
 
 
 @app.delete("/api/users/{username}")
-async def api_delete_user(username: str, request: Request):
-    if not _require_admin(request):
-        return JSONResponse({"error": "无权限"}, status_code=403)
+async def api_delete_user(username: str, admin: dict = Depends(require_admin)):
     ok, msg = auth.delete_user(username)
     return {"ok": ok, "msg": msg}
 
@@ -126,27 +120,21 @@ async def api_delete_user(username: str, request: Request):
 # ── 推流 API（需登录） ──
 
 @app.get("/api/status")
-async def get_status(request: Request):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def get_status(user: dict = Depends(get_current_user)):
     if not _streamer:
-        return JSONResponse({"error": "推流服务未初始化"}, status_code=503)
+        raise HTTPException(status_code=503, detail="推流服务未初始化")
     return _streamer.status
 
 
 @app.get("/api/playlist")
-async def get_playlist(request: Request):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def get_playlist(user: dict = Depends(get_current_user)):
     if not _streamer:
-        return JSONResponse({"error": "推流服务未初始化"}, status_code=503)
+        raise HTTPException(status_code=503, detail="推流服务未初始化")
     return _streamer.playlist.videos
 
 
 @app.post("/api/skip")
-async def skip_video(request: Request):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def skip_video(user: dict = Depends(get_current_user)):
     if not _streamer or not _streamer.is_running:
         return {"ok": False, "msg": "推流未运行"}
     _streamer.skip()
@@ -155,9 +143,7 @@ async def skip_video(request: Request):
 
 
 @app.post("/api/play/{index}")
-async def play_video(index: int, request: Request):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def play_video(index: int, user: dict = Depends(get_current_user)):
     if not _streamer or not _streamer.is_running:
         return {"ok": False, "msg": "推流未运行"}
     if _streamer.play(index):
@@ -166,13 +152,20 @@ async def play_video(index: int, request: Request):
     return {"ok": False, "msg": "无效的集数索引"}
 
 
+@app.post("/api/seek")
+async def seek_video(request: Request, user: dict = Depends(get_current_user)):
+    if not _streamer or not _streamer.is_running:
+        return {"ok": False, "msg": "推流未运行"}
+    body = await request.json()
+    position = float(body.get("position", 0))
+    if _streamer.seek(position):
+        log.info("Web 操作: 跳转到 %.1f 秒", position)
+        return {"ok": True, "msg": f"正在跳转到 {int(position)}s"}
+    return {"ok": False, "msg": "跳转失败"}
+
+
 @app.post("/api/stop")
-async def stop_stream(request: Request):
-    user = _get_user(request)
-    if not user:
-        return JSONResponse({"error": "未登录"}, status_code=401)
-    if user["role"] != "admin":
-        return JSONResponse({"ok": False, "msg": "仅管理员可停止推流"}, status_code=403)
+async def stop_stream(admin: dict = Depends(require_admin)):
     if not _streamer:
         return {"ok": False, "msg": "推流未初始化"}
     _streamer.stop()
@@ -181,12 +174,7 @@ async def stop_stream(request: Request):
 
 
 @app.post("/api/start")
-async def start_stream(request: Request):
-    user = _get_user(request)
-    if not user:
-        return JSONResponse({"error": "未登录"}, status_code=401)
-    if user["role"] != "admin":
-        return JSONResponse({"ok": False, "msg": "仅管理员可启动推流"}, status_code=403)
+async def start_stream(admin: dict = Depends(require_admin)):
     if not _streamer:
         return {"ok": False, "msg": "推流未初始化"}
     if _streamer.is_running:
@@ -197,11 +185,9 @@ async def start_stream(request: Request):
 
 
 @app.get("/api/browse")
-async def browse_dir(request: Request, path: str = "/"):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def browse_dir(path: str = "/", user: dict = Depends(get_current_user)):
     if not _streamer:
-        return JSONResponse({"error": "推流服务未初始化"}, status_code=503)
+        raise HTTPException(status_code=503, detail="推流服务未初始化")
     for source in _streamer.playlist.sources:
         if isinstance(source, WebDAVSource):
             items = source.list_dirs(path)
@@ -210,9 +196,7 @@ async def browse_dir(request: Request, path: str = "/"):
 
 
 @app.post("/api/switch")
-async def switch_dir(request: Request, path: str = "/"):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def switch_dir(path: str = "/", user: dict = Depends(get_current_user)):
     if not _streamer:
         return {"ok": False, "msg": "推流未初始化"}
     _streamer.playlist.switch_path(path)
@@ -230,20 +214,17 @@ def _save_config():
 
 
 @app.get("/api/overlay")
-async def get_overlay(request: Request):
-    if not _get_user(request):
-        return JSONResponse({"error": "未登录"}, status_code=401)
+async def get_overlay(user: dict = Depends(get_current_user)):
     logo = _config.get("logo", {}) if _config else {}
     overlay = _config.get("overlay", []) if _config else []
     clock = _config.get("clock", {}) if _config else {}
     images = _config.get("images", []) if _config else []
-    return {"logo": logo, "overlay": overlay, "clock": clock, "images": images}
+    webcam = _config.get("webcam", {}) if _config else {}
+    return {"logo": logo, "overlay": overlay, "clock": clock, "images": images, "webcam": webcam}
 
 
 @app.post("/api/overlay")
-async def save_overlay(request: Request):
-    if not _require_admin(request):
-        return JSONResponse({"error": "无权限"}, status_code=403)
+async def save_overlay(request: Request, admin: dict = Depends(require_admin)):
     body = await request.json()
 
     # 更新 config
@@ -263,19 +244,30 @@ async def save_overlay(request: Request):
         _config["images"] = body["images"]
         if _streamer:
             _streamer.images_cfg = body["images"]
+    if "webcam" in body:
+        _config["webcam"] = body["webcam"]
+        if _streamer:
+            _streamer.webcam_cfg = body["webcam"]
 
     _save_config()
     log.info("Web 操作: 更新画面设置")
+    
+    if _streamer and _streamer.is_running:
+        log.info("已触发生效，重载当前帧的视频流...")
+        _streamer.seek(_streamer.current_time)
+        return {"ok": True, "msg": "画面设置已保存，直播间画面将在几秒内刷新"}
+
     return {"ok": True, "msg": "画面设置已保存，下一个视频生效"}
 
 
 @app.post("/api/upload-logo")
-async def upload_logo(request: Request, file: UploadFile = File(...)):
-    if not _require_admin(request):
-        return JSONResponse({"error": "无权限"}, status_code=403)
-    # 保存到项目目录
+async def upload_logo(admin: dict = Depends(require_admin), file: UploadFile = File(...)):
+    # 确保 images 目录存在
+    os.makedirs("images", exist_ok=True)
+    
     ext = os.path.splitext(file.filename)[1] or ".png"
-    save_name = f"台标{ext}"
+    # 保存到 images 目录
+    save_name = f"images/台标{ext}"
     with open(save_name, "wb") as f:
         shutil.copyfileobj(file.file, f)
     # 更新 config 中的路径
@@ -292,10 +284,12 @@ async def upload_logo(request: Request, file: UploadFile = File(...)):
 async def upload_image(request: Request, file: UploadFile = File(...)):
     if not _require_admin(request):
         return JSONResponse({"error": "无权限"}, status_code=403)
-    # 保存到项目目录
+    
+    os.makedirs("images", exist_ok=True)
+    
     ext = os.path.splitext(file.filename)[1] or ".png"
-    # 使用时间戳作为文件名，避免中文乱码和冲突
-    save_name = f"overlay_{int(time.time()*1000)}{ext}"
+    # 保存到 images 目录
+    save_name = f"images/overlay_{int(time.time()*1000)}{ext}"
     with open(save_name, "wb") as f:
         shutil.copyfileobj(file.file, f)
     
@@ -600,24 +594,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge-on  { background: hsl(142,71%,45%,0.15); color: hsl(142,71%,55%); }
   .badge-off { background: hsl(0,62.8%,30.6%,0.15); color: hsl(0,86%,70%); }
 
-  /* ── 进度条 ── */
+  /* ── 进度条滑块 ── */
   .progress-wrap { margin: 14px 0 4px; }
   .progress-header {
     display: flex; justify-content: space-between;
     font-size: 13px; color: var(--muted-foreground);
     margin-bottom: 6px;
   }
-  .progress-bg {
-    width: 100%; height: 6px;
-    background: var(--muted);
-    border-radius: 3px; overflow: hidden;
+  .progress-slider {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 8px; border-radius: 4px;
+    background: var(--muted); outline: none;
+    cursor: pointer; transition: background 0.2s;
   }
-  .progress-fg {
-    height: 100%; width: 0%;
-    background: var(--primary);
-    border-radius: 3px;
-    transition: width 0.6s ease;
+  .progress-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--primary); cursor: grab;
+    border: 2px solid var(--background);
+    box-shadow: 0 0 6px rgba(99,102,241,0.5);
+    transition: transform 0.15s;
   }
+  .progress-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+  .progress-slider::-moz-range-thumb {
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--primary); cursor: grab; border: none;
+  }
+  .progress-slider::-webkit-slider-runnable-track { border-radius: 4px; }
+  .progress-slider::-moz-range-track { height: 8px; border-radius: 4px; background: var(--muted); }
 
   /* ── 监控卡片 ── */
   .monitor-grid {
@@ -1147,7 +1151,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span id="pTime">00:00 / 00:00</span>
         <span id="pPercent">0%</span>
       </div>
-      <div class="progress-bg"><div class="progress-fg" id="pBar"></div></div>
+      <input type="range" class="progress-slider" id="pSlider" min="0" max="1000" value="0" step="1">
     </div>
   </div>
 
@@ -1291,6 +1295,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- 挂机视频画中画 -->
+    <div class="card">
+      <div class="form-section">
+        <div class="form-section-title">🎥 挂机视频（画中画）</div>
+        <div class="form-grid">
+          <div class="form-group-sm" style="grid-column: span 2">
+            <label>视频文件路径</label>
+            <input type="text" id="webcamPath" placeholder="挂机视频.mp4">
+          </div>
+          <div class="form-group-sm">
+            <label>缩放高度 (px)</label>
+            <input type="number" id="webcamHeight" value="200" min="50" max="600">
+          </div>
+          <div class="form-group-sm">
+            <label>水平位置 X</label>
+            <input type="text" id="webcamX" value="W-w-20" placeholder="W-w-20">
+          </div>
+          <div class="form-group-sm">
+            <label>垂直位置 Y</label>
+            <input type="text" id="webcamY" value="H-h-20" placeholder="H-h-20">
+          </div>
+          <div class="form-group-sm">
+            <label>不透明度 (0~1)</label>
+            <input type="number" id="webcamOpacity" value="1.0" min="0" max="1" step="0.1">
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 文字叠加 -->
     <div class="card">
       <div class="form-section">
@@ -1379,7 +1412,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('btnStart').disabled = d.running;
       }
       const pct = d.progress || 0;
-      document.getElementById('pBar').style.width = pct + '%';
+      const slider = document.getElementById('pSlider');
+      if (!slider._dragging) {
+        slider.max = Math.max(d.duration || 1, 1);
+        slider.value = d.current_time || 0;
+      }
       document.getElementById('pPercent').textContent = pct.toFixed(1) + '%';
       document.getElementById('pTime').textContent = fmtTime(d.current_time) + ' / ' + fmtTime(d.duration);
       document.getElementById('mCpu').textContent = (d.cpu_percent || 0).toFixed(1) + '%';
@@ -1603,6 +1640,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     document.getElementById('clockFontsize').value = clock.fontsize || 24;
     document.getElementById('clockFontcolor').value = clock.fontcolor || 'white@0.8';
 
+    const webcam = overlayData.webcam || {};
+    document.getElementById('webcamPath').value = webcam.path || '';
+    document.getElementById('webcamHeight').value = webcam.height || 200;
+    document.getElementById('webcamX').value = webcam.x || 'W-w-20';
+    document.getElementById('webcamY').value = webcam.y || 'H-h-20';
+    document.getElementById('webcamOpacity').value = webcam.opacity ?? 1.0;
 
     const imgList = overlayData.images || [];
     document.getElementById('imageList').innerHTML = imgList.map((item, i) => renderImageItem(item, i)).join('');
@@ -1876,6 +1919,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       ctx.restore();
     });
 
+    // 挂机视频 (画中画) 预览
+    const webcam = collectOverlayData().webcam || {};
+    if (webcam.path) {
+      const camH = (webcam.height || 200) * sy;
+      const camW = camH * 16 / 9;  // 假设 16:9 比例
+      // 解析 FFmpeg 表达式位置 (W-w-20 等)
+      const camExprX = String(webcam.x || 'W-w-20').replace(/W/g, '1920').replace(/w/g, String(webcam.height ? Math.round((webcam.height||200)*16/9) : 356));
+      const camExprY = String(webcam.y || 'H-h-20').replace(/H/g, '1080').replace(/h/g, String(webcam.height||200));
+      let camX, camY;
+      try { camX = Function('return ' + camExprX)() * sx; } catch { camX = (W - camW - 20*sx); }
+      try { camY = Function('return ' + camExprY)() * sy; } catch { camY = (H - camH - 20*sy); }
+      ctx.save();
+      ctx.globalAlpha = webcam.opacity ?? 1.0;
+      ctx.fillStyle = 'rgba(34,197,94,0.2)';
+      ctx.strokeStyle = 'rgba(34,197,94,0.7)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]);
+      ctx.fillRect(camX, camY, camW, camH);
+      ctx.strokeRect(camX, camY, camW, camH);
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(34,197,94,0.9)';
+      ctx.font = `600 ${Math.max(11, camH*0.12)}px Inter,sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('📹 挂机视频', camX + camW/2, camY + camH/2 + 4);
+      ctx.restore();
+    }
+
     // 时钟
     const clock = collectOverlayData().clock || {};
     if (document.getElementById('clockSwitch').classList.contains('on')) {
@@ -1932,7 +2002,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       fontsize: +document.getElementById('clockFontsize').value,
       fontcolor: document.getElementById('clockFontcolor').value
     };
-    return { logo, overlay: overlayData.overlay || [], clock, images: overlayData.images || [] };
+    const webcam = {
+      path: document.getElementById('webcamPath').value,
+      height: +document.getElementById('webcamHeight').value || 200,
+      x: document.getElementById('webcamX').value || 'W-w-20',
+      y: document.getElementById('webcamY').value || 'H-h-20',
+      opacity: +document.getElementById('webcamOpacity').value
+    };
+    return { logo, overlay: overlayData.overlay || [], clock, images: overlayData.images || [], webcam };
   }
 
   async function saveOverlay() {
@@ -1970,6 +2047,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     input.value = '';
   }
+
+  // ── 进度条拖动跳转 ──
+  (function() {
+    const slider = document.getElementById('pSlider');
+    slider._dragging = false;
+    slider.addEventListener('mousedown', () => { slider._dragging = true; });
+    slider.addEventListener('touchstart', () => { slider._dragging = true; });
+    async function doSeek() {
+      slider._dragging = false;
+      const pos = parseFloat(slider.value);
+      try {
+        const res = await fetch('/api/seek', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({position: pos})
+        });
+        const d = await res.json();
+        showToast(d.msg || '跳转中...');
+      } catch(e) { showToast('跳转失败'); }
+    }
+    slider.addEventListener('mouseup', doSeek);
+    slider.addEventListener('touchend', doSeek);
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      document.getElementById('pTime').textContent = fmtTime(v) + ' / ' + fmtTime(parseFloat(slider.max));
+    });
+  })();
 
   // ── 启动 ──
   init().then(() => {

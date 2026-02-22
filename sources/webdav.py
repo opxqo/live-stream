@@ -79,6 +79,9 @@ class WebDAVSource(VideoSource):
         videos: list[VideoItem] = []
         try:
             entries = self.client.ls(dir_path, detail=True)
+        except httpx.ReadTimeout:
+            log.warning("列举 %s 超时，暂返回空列表", dir_path)
+            return videos
         except Exception as e:
             log.warning("列举 %s 失败: %s", dir_path, e)
             return videos

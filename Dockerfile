@@ -12,7 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制源码
-COPY main.py streamer.py playlist.py web.py auth.py ./
+COPY main.py streamer.py playlist.py web.py auth.py bilibili_api.py ./
 COPY sources/ ./sources/
 
 # Web 面板端口

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 — 直播推流管理</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --background: hsl(240, 10%, 3.9%);
+    --foreground: hsl(0, 0%, 98%);
+    --card: hsl(240, 10%, 3.9%);
+    --card-foreground: hsl(0, 0%, 98%);
+    --primary: hsl(222, 47%, 50%);
+    --primary-foreground: hsl(0, 0%, 98%);
+    --muted: hsl(240, 3.7%, 15.9%);
+    --muted-foreground: hsl(240, 5%, 64.9%);
+    --border: hsl(240, 3.7%, 15.9%);
+    --input: hsl(240, 3.7%, 15.9%);
+    --ring: hsl(222, 47%, 50%);
+    --destructive: hsl(0, 62.8%, 30.6%);
+    --radius: 0.5rem;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--background);
+    color: var(--foreground);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-card {
+    width: 90%;
+    max-width: 380px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 40px 32px;
+  }
+  @media (max-width: 480px) {
+    .login-card { padding: 28px 20px; }
+    .login-card h1 { font-size: 20px; }
+    .form-group input, .btn-primary { height: 44px; font-size: 15px; }
+  }
+  .login-card h1 {
+    font-size: 24px;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 6px;
+  }
+  .login-card .subtitle {
+    text-align: center;
+    color: var(--muted-foreground);
+    font-size: 14px;
+    margin-bottom: 28px;
+  }
+  .form-group {
+    margin-bottom: 18px;
+  }
+  .form-group label {
+    display: block;
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .form-group input {
+    width: 100%;
+    height: 40px;
+    padding: 0 12px;
+    background: var(--background);
+    border: 1px solid var(--input);
+    border-radius: var(--radius);
+    color: var(--foreground);
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .form-group input:focus {
+    border-color: var(--ring);
+    box-shadow: 0 0 0 2px hsla(222, 47%, 50%, 0.25);
+  }
+  .form-group input::placeholder { color: var(--muted-foreground); }
+  .btn-primary {
+    width: 100%;
+    height: 40px;
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border: none;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .error-msg {
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: hsl(0, 62.8%, 30.6%, 0.15);
+    border: 1px solid hsl(0, 62.8%, 30.6%, 0.3);
+    border-radius: var(--radius);
+    color: hsl(0, 86%, 70%);
+    font-size: 13px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>📡 直播推流</h1>
+  <div class="subtitle">登录管理面板</div>
+  <div class="form-group">
+    <label for="username">用户名</label>
+    <input type="text" id="username" placeholder="请输入用户名" autocomplete="username">
+  </div>
+  <div class="form-group">
+    <label for="password">密码</label>
+    <input type="password" id="password" placeholder="请输入密码" autocomplete="current-password">
+  </div>
+  <button class="btn-primary" id="btnLogin" onclick="doLogin()">登 录</button>
+  <div class="error-msg" id="errMsg"></div>
+</div>
+<script>
+  document.getElementById('password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+  async function doLogin() {
+    const btn = document.getElementById('btnLogin');
+    const err = document.getElementById('errMsg');
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    if (!username || !password) { err.textContent = '请填写用户名和密码'; err.style.display = 'block'; return; }
+    btn.disabled = true;
+    btn.textContent = '登录中...';
+    err.style.display = 'none';
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ username, password })
+      });
+      const d = await res.json();
+      if (d.ok) { location.href = '/'; }
+      else { err.textContent = d.msg; err.style.display = 'block'; }
+    } catch(e) { err.textContent = '网络错误'; err.style.display = 'block'; }
+    btn.disabled = false;
+    btn.textContent = '登 录';
+  }
+</script>
+</body>
+</html>

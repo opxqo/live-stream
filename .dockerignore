@@ -12,3 +12,5 @@ progress.json
 users.json
 config.yaml
 .env
+images/
+webcam/

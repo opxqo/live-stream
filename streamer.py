@@ -32,6 +32,7 @@ class Streamer:
         self.overlay_cfg = config.get("overlay", [])
         self.logo_cfg = config.get("logo", {})
         self.images_cfg = config.get("images", [])
+        self.webcam_cfg = config.get("webcam", {})  # 挂机视频画中画
         self.clock_cfg = config.get("clock", {})
         self.resilience = config.get("resilience", {})
         self.email_cfg = config.get("email", {})
@@ -41,6 +42,7 @@ class Streamer:
         self._pipe_thread: threading.Thread | None = None  # 管道传输线程
         self._running = False
         self._skip_requested = False  # 用户主动跳过/点播标志
+        self._seek_position: float | None = None  # 用户拖动进度条跳转目标
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -53,8 +55,7 @@ class Streamer:
         self.videos_played: int = 0
         self._total_failures: int = 0    # 累计失败次数
         self._last_diagnosis_time: float = 0  # 上次自检时间戳
-
-        # FFmpeg 实时指标
+        self._last_pusher_heartbeat: float = 0  # 推流器最后输出时间戳
         self.duration: float = 0.0       # 视频总时长（秒）
         self.current_time: float = 0.0   # 当前播放位置（秒，绝对时间）
         self.progress: float = 0.0       # 播放进度 0~100
@@ -122,9 +123,16 @@ class Streamer:
         self._start_pusher()
 
         while self._running:
-            # 检查推流器是否存活，死了则重启
-            if self._pusher_process is None or self._pusher_process.poll() is not None:
-                log.warning("推流器进程已退出，重新启动...")
+            now = time.time()
+            # 检查推流器是否存活或假死（超过 30 秒无输出）
+            pusher_dead = self._pusher_process is None or self._pusher_process.poll() is not None
+            pusher_hang = not pusher_dead and (now - self._last_pusher_heartbeat > 30)
+
+            if pusher_dead or pusher_hang:
+                if pusher_hang:
+                    log.error("推流器进程超过 30 秒无响应，判定为假死，执行强制重启...")
+                else:
+                    log.warning("推流器进程已退出，重新启动...")
                 self._start_pusher()
 
             video = self.playlist.next()
@@ -172,6 +180,13 @@ class Streamer:
                         self._skip_requested = False
                         log.info("⏭ 用户操作，切换视频")
                         break
+
+                    # 用户拖动进度条跳转，以新位置重启解码器
+                    if self._seek_position is not None:
+                        resume_pos = self._seek_position
+                        self._seek_position = None
+                        log.info("⏩ Seek 到 %.1f 秒，重启解码器", resume_pos)
+                        continue
 
                     if returncode == 0:
                         log.info("✓ %s 播放完毕", video.name)
@@ -242,6 +257,21 @@ class Streamer:
         # 终止当前进程，主循环会自动取 jump_to 设置的视频
         if self._process and self._process.poll() is None:
             self._skip_requested = True
+            self._process.terminate()
+        return True
+
+    def seek(self, position: float) -> bool:
+        """跳转到当前视频的指定秒数位置"""
+        if not self._running or not self._process:
+            return False
+        if self.duration > 0 and position > self.duration:
+            position = self.duration - 5
+        if position < 0:
+            position = 0
+        self._seek_position = position
+        log.info("⏩ 跳转到 %.1f 秒", position)
+        # 终止当前解码器，主循环会用 _seek_position 重建
+        if self._process.poll() is None:
             self._process.terminate()
         return True
 
@@ -341,7 +371,15 @@ class Streamer:
             else:
                 log.warning("图片文件不存在: %s", path)
 
-        # 3. 滤镜链
+        # 3. 挂机视频输入 (画中画，循环播放)
+        webcam_path = self.webcam_cfg.get("path", "")
+        webcam_input_idx = None
+        if self.webcam_cfg.get("enabled", True) and webcam_path and os.path.exists(webcam_path):
+            webcam_input_idx = 1 + len(valid_images)  # 紧跟在图片输入之后
+            cmd += ["-stream_loop", "-1", "-i", webcam_path]
+            log.info("挂机视频已加载: %s (input %d)", webcam_path, webcam_input_idx)
+
+        # 4. 滤镜链
         # [0:v] 缩放并填充黑边 -> [base]
         fc = f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2[base];"
         
@@ -364,6 +402,20 @@ class Streamer:
             # 叠加
             next_stream = f"[v{i}]"
             fc += f"{current_stream}[img{i}]overlay=x={ix}:y={iy}{next_stream};"
+            current_stream = next_stream
+
+        # 叠加挂机视频画中画 (右下角)
+        if webcam_input_idx is not None:
+            cam_h = self.webcam_cfg.get("height", 200)
+            cam_x = self.webcam_cfg.get("x", f"W-w-20")
+            cam_y = self.webcam_cfg.get("y", f"H-h-20")
+            cam_opacity = self.webcam_cfg.get("opacity", 1.0)
+            fc += f"[{webcam_input_idx}:v]scale=-1:{cam_h},format=rgba"
+            if cam_opacity < 1.0:
+                fc += f",colorchannelmixer=aa={cam_opacity}"
+            fc += f"[cam];"
+            next_stream = "[vcam]"
+            fc += f"{current_stream}[cam]overlay=x={cam_x}:y={cam_y}{next_stream};"
             current_stream = next_stream
 
         # 叠加文字
@@ -399,6 +451,11 @@ class Streamer:
             "-f", "mpegts", "-i", "pipe:0",
             "-c", "copy",
             "-flvflags", "no_duration_filesize",
+            "-rw_timeout", "15000000",          # 15秒 socket 读写超时
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",        # 最大重连间隔 2 秒
             "-f", "flv", rtmp_url,
         ]
 
@@ -424,12 +481,12 @@ class Streamer:
                 borderw=item.get("borderw", 2),
             ))
 
-        # 右下角集数
+        # 右上角集数
         episode = self._extract_episode(video_name)
         if episode:
             parts.append(self._drawtext(
                 text=episode, fontsize=28, fontcolor="white@0.8",
-                x="w-tw-30", y="h-th-30", borderw=1,
+                x="w-tw-30", y="60", borderw=1,
             ))
 
         # 右上角实时时钟
@@ -499,9 +556,11 @@ class Streamer:
                 return path.replace("\\", "/")
         return None
 
-    # 正则：匹配 FFmpeg 输出中的 Duration 和实时状态行
-    _RE_DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)")
-    _RE_PROGRESS = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
+    # 正则：匹配 FFmpeg 输出中的 Duration    # 匹配进度和时长（忽略挂机视频等其它的 stream 干扰）
+    # ffmpeg 输出的主视频时长通常是第一个 Duration:
+    _RE_DURATION = re.compile(r"Duration: (\d+):(\d+):(\d+)\.(\d+)")
+    # ffmpeg 真实的融合进度行往往带有 q= xxx 或者 frame= xxx
+    _RE_PROGRESS = re.compile(r"(?:frame=|q=).*time=(\d+):(\d+):(\d+)\.(\d+)")
     _RE_BITRATE = re.compile(r"bitrate=\s*([\d.]+\s*kbits/s)")
     _RE_SPEED = re.compile(r"speed=\s*([\d.]+x)")
 
@@ -509,6 +568,16 @@ class Streamer:
         """启动持久推流器进程"""
         cmd = self._build_pusher_cmd()
         log.info("启动推流器: %s", ' '.join(cmd)[:300])
+        self._last_pusher_heartbeat = time.time()
+        
+        # 强制清理遗留推流器
+        if self._pusher_process and self._pusher_process.poll() is None:
+            try:
+                self._pusher_process.kill()
+                self._pusher_process.wait(timeout=2)
+            except:
+                pass
+
         self._pusher_process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -520,23 +589,13 @@ class Streamer:
 
     def _restart_pusher(self):
         """重启推流器（推流码变更时调用）"""
-        log.info("🔄 重启推流器...")
-        if self._pusher_process and self._pusher_process.poll() is None:
-            try:
-                self._pusher_process.stdin.close()
-            except Exception:
-                pass
-            self._pusher_process.terminate()
-            try:
-                self._pusher_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._pusher_process.kill()
+        log.info("🔄 主动触发重启推流器...")
         self._start_pusher()
 
     def _pipe_data(self):
         """将解码器 stdout 管道传送到推流器 stdin"""
         try:
-            while True:
+            while self._running:
                 chunk = self._process.stdout.read(65536)
                 if not chunk:
                     break
@@ -544,11 +603,13 @@ class Streamer:
                     try:
                         self._pusher_process.stdin.write(chunk)
                         self._pusher_process.stdin.flush()
-                    except (BrokenPipeError, OSError):
-                        log.error("推流管道断开")
+                    except (BrokenPipeError, OSError) as e:
+                        log.error("推流管道断开: %s", e)
                         break
         except Exception as e:
             log.warning("管道传输异常: %s", e)
+        finally:
+            log.info("管道传输线程退出")
 
     def _read_pusher_output(self):
         """后台读取推流器进程输出"""
@@ -556,9 +617,14 @@ class Streamer:
             return
         try:
             for line in self._pusher_process.stdout:
+                if not self._running:
+                    break
+                self._last_pusher_heartbeat = time.time()  # 更新心跳时间
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
-                    log.info("[推流器] %s", text)
+                    # 降低输出频率，仅关键日志打印
+                    if "Error" in text or "error" in text or "Failed" in text or "Connection" in text:
+                        log.warning("[推流器] %s", text)
         except Exception:
             pass
 
@@ -576,10 +642,11 @@ class Streamer:
             m = self._RE_DURATION.search(text)
             if m:
                 with self._lock:
-                    self.duration = (
-                        int(m.group(1)) * 3600 + int(m.group(2)) * 60
-                        + int(m.group(3)) + int(m.group(4)) / 100
-                    )
+                    if self.duration == 0:
+                        self.duration = (
+                            int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                            + int(m.group(3)) + int(m.group(4)) / 100
+                        )
 
             # 解析当前播放位置
             m = self._RE_PROGRESS.search(text)
@@ -938,9 +1005,8 @@ class Streamer:
         for source in self.playlist.sources:
             if isinstance(source, WebDAVSource):
                 try:
-                    req = urllib.request.Request(source.url, method="HEAD")
-                    resp = urllib.request.urlopen(req, timeout=10)
-                    return {"id": "webdav", "name": name, "ok": True, "detail": f"{source.url} 可达 ({resp.status})"}
+                    resp = requests.head(source.url, timeout=10, verify=False)
+                    return {"id": "webdav", "name": name, "ok": True, "detail": f"{source.url} 可达 ({resp.status_code})"}
                 except Exception as e:
                     return {"id": "webdav", "name": name, "ok": False, "detail": f"{source.url} 不可达: {e}"}
         return {"id": "webdav", "name": name, "ok": True, "detail": "未配置 WebDAV 源"}

@@ -65,7 +65,7 @@ class BilibiliAPI:
             return False, None, None, "Cookie 中缺少 bili_jct (csrf)，无法鉴权"
 
         data = self._get_base_data()
-        data['area_v2'] = '236'  # 默认单机游戏分类，可在此更改
+        data['area_v2'] = '624'  # 默认单机游戏分类，可在此更改
         data['type'] = '2'
         data['backup_stream'] = '0'
         data['sign'] = generate_sign(data, self.appkey)

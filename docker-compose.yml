@@ -6,7 +6,11 @@ services:
     ports:
       - "8088:8088"
     volumes:
+      # 配置文件
       - /opt/docker/live-stream/config.yaml:/app/config.yaml
-      - /opt/docker/live-stream/台标.png:/app/台标.png
+      # 挂机视频所在文件夹
+      - /opt/docker/live-stream/webcam:/app/webcam
+      # 存放台标和所有叠加图片的文件夹
+      - /opt/docker/live-stream/images:/app/images
       - /opt/docker/live-stream/progress.json:/app/progress.json
       - /opt/docker/live-stream/users.json:/app/users.json
