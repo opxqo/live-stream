@@ -49,7 +49,7 @@ class StreamClientApp:
         tk.Label(lf_server, text="端口 / 频道:", bg='#1e1e1e', fg='#ccc').grid(row=1, column=0, sticky='e', pady=5)
         frame_port_path = tk.Frame(lf_server, bg='#1e1e1e')
         frame_port_path.grid(row=1, column=1, sticky='w', padx=5, pady=5)
-        self.var_port = tk.StringVar(value="1935")
+        self.var_port = tk.StringVar(value="8554")
         ttk.Entry(frame_port_path, textvariable=self.var_port, width=6).pack(side=tk.LEFT)
         tk.Label(frame_port_path, text=" / ", bg='#1e1e1e', fg='#ccc').pack(side=tk.LEFT)
         self.var_path = tk.StringVar(value="webcam")
@@ -165,11 +165,11 @@ class StreamClientApp:
             messagebox.showerror("错误", "请将服务器配置填写完整！")
             return
 
-        # 构建鉴权 RTMP URL (兼容 MediaMTX 标准形式)
+        # 构建鉴权 RTSP URL
         if user and pwd:
-            rtmp_url = f"rtmp://{ip}:{port}/{path}?user={user}&pass={pwd}"
+            stream_url = f"rtsp://{user}:{pwd}@{ip}:{port}/{path}"
         else:
-            rtmp_url = f"rtmp://{ip}:{port}/{path}"
+            stream_url = f"rtsp://{ip}:{port}/{path}"
 
         cmd = ["ffmpeg", "-y"]
         
@@ -194,7 +194,7 @@ class StreamClientApp:
             "-bufsize", "3000k",
             "-pix_fmt", "yuv420p",
             "-g", "60",
-            "-f", "flv", rtmp_url
+            "-f", "rtsp", "-rtsp_transport", "tcp", stream_url
         ]
 
         self.log(f"目标地址: {ip}:{port}/{path}")
@@ -226,10 +226,7 @@ class StreamClientApp:
         try:
             for line in self.process.stdout:
                 line = line.strip()
-                if not line:
-                    continue
-                # 过滤常见心跳日志，只抓取报错或关键信息
-                if "error" in line.lower() or "failed" in line.lower() or "rtmp" in line.lower():
+                if line:
                     self.log(line)
         except Exception:
             pass
