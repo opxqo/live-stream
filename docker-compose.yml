@@ -7,13 +7,13 @@ services:
       - "8088:8088"
     volumes:
       # 配置文件
-      - /opt/docker/live-stream/config.yaml:/app/config.yaml
+      - ./config.yaml:/app/config.yaml
       # 挂机视频所在文件夹
-      - /opt/docker/live-stream/webcam:/app/webcam
+      - ./webcam:/app/webcam
       # 存放台标和所有叠加图片的文件夹
-      - /opt/docker/live-stream/images:/app/images
-      - /opt/docker/live-stream/progress.json:/app/progress.json
-      - /opt/docker/live-stream/users.json:/app/users.json
+      - ./images:/app/images
+      - ./progress.json:/app/progress.json
+      - ./users.json:/app/users.json
     depends_on:
       - mediamtx
 
@@ -27,4 +27,4 @@ services:
       - "8888:8888" # HLS 查询端口
       - "8889:8889" # WebRTC 预览端口
     volumes:
-      - /opt/docker/live-stream/mediamtx.yml:/mediamtx.yml
+      - ./mediamtx.yml:/mediamtx.yml
