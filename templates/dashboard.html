@@ -2108,6 +2108,13 @@
         y: isNaN(+document.getElementById('logoY').value) ? document.getElementById('logoY').value : +document.getElementById('logoY').value,
         opacity: +document.getElementById('logoOpacity').value
       };
+      const clockEnabled = document.getElementById('clockSwitch').classList.contains('on');
+      const clock = {
+        enabled: clockEnabled,
+        fontsize: +document.getElementById('clockFontsize').value,
+        fontcolor: document.getElementById('clockFontcolor').value
+      };
+
       const webcamEnabled = document.getElementById('webcamSwitch').classList.contains('on');
       const webcam = {
         enabled: webcamEnabled,
@@ -2117,12 +2124,7 @@
         y: isNaN(+document.getElementById('webcamY').value) ? document.getElementById('webcamY').value : +document.getElementById('webcamY').value,
         opacity: +document.getElementById('webcamOpacity').value
       };
-      const clockEnabled = document.getElementById('clockSwitch').classList.contains('on');
-      const clock = {
-        enabled: clockEnabled,
-        fontsize: +document.getElementById('clockFontsize').value,
-        fontcolor: document.getElementById('clockFontcolor').value
-      };
+
       return { logo, webcam, overlay: overlayData.overlay || [], clock, images: overlayData.images || [] };
     }
 
