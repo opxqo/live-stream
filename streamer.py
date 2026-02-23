@@ -371,13 +371,31 @@ class Streamer:
             else:
                 log.warning("图片文件不存在: %s", path)
 
-        # 3. 挂机视频输入 (画中画，循环播放)
+        # 3. 挂机视频输入 (画中画，现在可能是本地视频或经过 MediaMTX 的 RTSP 实时流)
         webcam_path = self.webcam_cfg.get("path", "")
         webcam_input_idx = None
-        if self.webcam_cfg.get("enabled", True) and webcam_path and os.path.exists(webcam_path):
-            webcam_input_idx = 1 + len(valid_images)  # 紧跟在图片输入之后
-            cmd += ["-stream_loop", "-1", "-i", webcam_path]
-            log.info("挂机视频已加载: %s (input %d)", webcam_path, webcam_input_idx)
+        if self.webcam_cfg.get("enabled", True) and webcam_path:
+            is_rtsp = webcam_path.startswith("rtsp://") or webcam_path.startswith("rtmp://")
+            
+            # 引入防卡死探针：如果填写的是网络流媒体地址，务必提前探测它是否“真的存在”
+            stream_alive = True
+            if is_rtsp and "mediamtx" in webcam_path.lower():
+                stream_alive = self._is_mediamtx_stream_alive("webcam")
+            
+            # 如果是本地文件，检查是否存在；如果是网络流且探针确认活着，则将其编入 FFmpeg -i 输入
+            if stream_alive and (is_rtsp or os.path.exists(webcam_path)):
+                webcam_input_idx = 1 + len(valid_images)
+                
+                # 网络流专用的极致防波动的安全拉流参数，并且保证不管死活都不阻塞主视频播放
+                if is_rtsp:
+                    cmd += ["-thread_queue_size", "2048", "-timeout", "5000000", "-i", webcam_path]
+                    log.info("📡 接通实时画中画信源: %s (input %d)", webcam_path, webcam_input_idx)
+                else:
+                    cmd += ["-stream_loop", "-1", "-i", webcam_path]
+                    log.info("挂机视频已加载: %s (input %d)", webcam_path, webcam_input_idx)
+            else:
+                if is_rtsp:
+                    log.info("📡 远程实时摄像头 [未开播 / 离线]，主屏幕继续播出不受影响。")
 
         # 4. 滤镜链
         # [0:v] 缩放并填充黑边 -> [base]
@@ -555,6 +573,20 @@ class Streamer:
             if os.path.exists(path):
                 return path.replace("\\", "/")
         return None
+
+    def _is_mediamtx_stream_alive(self, path_name: str) -> bool:
+        """探针检测 MediaMTX 内某个 stream 是否正处于推流活跃状态"""
+        try:
+            # 假定与 MediaMTX 在同一 Docker network，使用 9997 API 端口
+            resp = requests.get(f"http://mediamtx:9997/v3/paths/get/{path_name}", timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                # ready 代表目前已发布能够拉流（即主播端推流端在线）
+                if data.get("ready"):
+                    return True
+        except Exception as e:
+            log.warning("探针探测 MediaMTX 失败: %s", e)
+        return False
 
     # 正则：匹配 FFmpeg 输出中的 Duration    # 匹配进度和时长（忽略挂机视频等其它的 stream 干扰）
     # ffmpeg 输出的主视频时长通常是第一个 Duration:
