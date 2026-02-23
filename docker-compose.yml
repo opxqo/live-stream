@@ -1,6 +1,7 @@
 services:
   live-stream:
     image: 192.168.1.11:5000/live-stream:latest
+    build: .
     container_name: live-stream
     restart: always
     ports:

@@ -281,9 +281,10 @@ class Streamer:
         self._cleanup()
 
         # === 新增：全面关播 ===
+        is_bilibili = "bili" in self.stream_cfg.get("rtmp_url", "").lower()
         bili_cookie = self._bili_cfg.get("cookie")
         bili_room = self._bili_cfg.get("room_id")
-        if bili_cookie and bili_room:
+        if is_bilibili and bili_cookie and bili_room:
             try:
                 log.info("停止推流，尝试向 B 站发送关播请求...")
                 bili_api = BilibiliAPI(bili_room, bili_cookie)
@@ -779,8 +780,11 @@ class Streamer:
             if not rtmp_ok: reason_parts.append("RTMP不可达")
             if not key_ok: reason_parts.append("推流码异常")
             if not live_ok: reason_parts.append("直播间未开播")
-            log.error("⛔ %s，准备尝试依靠后台自动重新开播...", "、".join(reason_parts))
-            if self._bili_cfg and self._bili_cfg.get("cookie"):
+            
+            is_bilibili = "bili" in self.stream_cfg.get("rtmp_url", "").lower()
+            
+            if is_bilibili and self._bili_cfg and self._bili_cfg.get("cookie"):
+                log.error("⛔ %s，准备尝试依靠后台自动重新开播...", "、".join(reason_parts))
                 reconnect_success = self._attempt_auto_restart()
                 if reconnect_success:
                     log.info("✅ 后台自动重新开播成功！推流程序将继续。")
@@ -789,8 +793,8 @@ class Streamer:
                     log.error("⛔ 自动重新开播失败，建议彻底停止推流")
                     return True
             else:
-                log.error("⛔ 自动开播失败：未在 config.yaml 发现有效的 bilibili 配置")
-                return True
+                log.error("⛔ %s。当前处于多平台特化防卡死模式，系统将跳过 B 站特有的抢救 API，仅做泛用的无头重连尝试。", "、".join(reason_parts))
+                return False
                 
         return False
 
@@ -1013,6 +1017,11 @@ class Streamer:
     def _check_live_status(self) -> dict:
         """通过 B 站 API 检查直播间是否正在直播"""
         name = "直播间状态"
+        
+        is_bilibili = "bili" in self.stream_cfg.get("rtmp_url", "").lower()
+        if not is_bilibili:
+            return {"id": "live_status", "name": name, "ok": True, "detail": "非 B 站特化推流，跳过自检"}
+            
         room_id = self._bili_cfg.get("room_id") if self._bili_cfg else None
         if not room_id:
             return {"id": "live_status", "name": name, "ok": True, "detail": "未配置 room_id，跳过"}
