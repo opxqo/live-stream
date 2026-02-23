@@ -1,0 +1,25 @@
+###############################################
+# MediaMTX 配置文件 (用于接收副程序的本地推流)
+###############################################
+
+# 开启的协议
+rtmp: yes
+rtsp: yes
+hls: yes
+webrtc: yes
+
+# API 和监控
+api: yes
+apiAddress: :9997
+
+# 全局路径匹配规则
+paths:
+  # 给本地主程序 (副播挂件) 留的一条专线
+  webcam:
+    # --- 鉴权设置 (防蹭流/防炸频道) ---
+    publishUser: liveadmin
+    publishPass: L1ve!P@ss
+    # 允许任何人读取 (给同一台宿主机内部的主程序 FFmpeg 不受限拉流)
+    readUser: ""
+    readPass: ""
+ 

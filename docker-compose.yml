@@ -14,3 +14,17 @@ services:
       - /opt/docker/live-stream/images:/app/images
       - /opt/docker/live-stream/progress.json:/app/progress.json
       - /opt/docker/live-stream/users.json:/app/users.json
+    depends_on:
+      - mediamtx
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: live-stream-mediamtx
+    restart: always
+    ports:
+      - "8554:8554" # RTSP 推流接收端口
+      - "1935:1935" # RTMP 推流接收端口 (备用)
+      - "8888:8888" # HLS 查询端口
+      - "8889:8889" # WebRTC 预览端口
+    volumes:
+      - /opt/docker/live-stream/mediamtx.yml:/mediamtx.yml
