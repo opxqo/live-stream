@@ -165,8 +165,11 @@ class StreamClientApp:
             messagebox.showerror("错误", "请将服务器配置填写完整！")
             return
 
-        # 构建鉴权 RTMP URL
-        rtmp_url = f"rtmp://{user}:{pwd}@{ip}:{port}/{path}"
+        # 构建鉴权 RTMP URL (兼容 MediaMTX 标准形式)
+        if user and pwd:
+            rtmp_url = f"rtmp://{ip}:{port}/{path}?user={user}&pass={pwd}"
+        else:
+            rtmp_url = f"rtmp://{ip}:{port}/{path}"
 
         cmd = ["ffmpeg", "-y"]
         
