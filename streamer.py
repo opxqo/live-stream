@@ -62,7 +62,9 @@ class Streamer:
         self.bitrate: str = ""           # 推流码率
         self.speed: str = ""             # 编码速度
         self._seek_offset: float = 0.0   # -ss 跳转偏移量
-        
+
+        # 多平台推流：当前激活的平台 (bilibili / huya / custom)
+        self._active_platform: str = self.stream_cfg.get("active_platform", "bilibili")
         # B站API相关配置缓存
         self._bili_cfg = config.get("bilibili", {})
 
@@ -88,36 +90,34 @@ class Streamer:
         max_delay = self.resilience.get("max_retry_delay", 60)
         max_retries = self.resilience.get("max_retries", 0)
 
+        platform_names = {"bilibili": "B 站", "huya": "虎牙", "custom": "自定义"}
+        platform_label = platform_names.get(self._active_platform, self._active_platform)
+
         log.info("=" * 50)
-        log.info("B 站 24 小时推流服务已启动")
+        log.info("24 小时推流服务已启动 [平台: %s]", platform_label)
         log.info("视频总数: %d", self.playlist.total)
         log.info("=" * 50)
 
-        self._notify_email("🟢 推流服务已启动", f"视频总数: {self.playlist.total}")
+        self._notify_email("🟢 推流服务已启动", f"平台: {platform_label}\n视频总数: {self.playlist.total}")
 
-        # === 新增：自动获取 B 站推流码与开播 ===
-        bili_cookie = self._bili_cfg.get("cookie")
-        bili_room = self._bili_cfg.get("room_id")
-        if bili_cookie and bili_room:
-            log.info("检测到 B 站 Cookie，正在自动请求开播...")
-            bili_api = BilibiliAPI(bili_room, bili_cookie)
-            ok, url, code, msg = bili_api.start_live()
-            if ok and url and code:
-                with self._lock:
-                    self.stream_cfg["rtmp_url"] = url
-                    self.stream_cfg["stream_key"] = code
-                log.info("获取最新推流码成功，正在同步 config.yaml")
-                try:
-                    with open("config.yaml", "r", encoding="utf-8") as f:
-                        fc = yaml.safe_load(f)
-                    fc["stream"]["rtmp_url"] = url
-                    fc["stream"]["stream_key"] = code
-                    with open("config.yaml", "w", encoding="utf-8") as f:
-                        yaml.dump(fc, f, allow_unicode=True, sort_keys=False)
-                except Exception as e:
-                    log.warning("写入 config.yaml 异常: %s", e)
-            else:
-                log.warning("自动开播失败，回退使用最近一次推流配置。原因: %s", msg)
+        # B 站平台专属：自动获取推流码与开播
+        if self._active_platform == "bilibili":
+            bili_cookie = self._bili_cfg.get("cookie")
+            bili_room = self._bili_cfg.get("room_id")
+            if bili_cookie and bili_room:
+                log.info("检测到 B 站 Cookie，正在自动请求开播...")
+                bili_api = BilibiliAPI(bili_room, bili_cookie)
+                ok, url, code, msg = bili_api.start_live()
+                if ok and url and code:
+                    with self._lock:
+                        self.stream_cfg["rtmp_url"] = url
+                        self.stream_cfg["stream_key"] = code
+                    log.info("获取最新推流码成功，正在同步 config.yaml")
+                    self._persist_stream_config(url, code)
+                else:
+                    log.warning("自动开播失败，回退使用最近一次推流配置。原因: %s", msg)
+        else:
+            log.info("当前平台 [%s]，跳过 B 站自动开播", platform_label)
 
         # 启动持久推流器（RTMP 连接一直在线）
         self._start_pusher()
@@ -280,17 +280,17 @@ class Streamer:
         self._running = False
         self._cleanup()
 
-        # === 新增：全面关播 ===
-        is_bilibili = "bili" in self.stream_cfg.get("rtmp_url", "").lower()
-        bili_cookie = self._bili_cfg.get("cookie")
-        bili_room = self._bili_cfg.get("room_id")
-        if is_bilibili and bili_cookie and bili_room:
-            try:
-                log.info("停止推流，尝试向 B 站发送关播请求...")
-                bili_api = BilibiliAPI(bili_room, bili_cookie)
-                bili_api.stop_live()
-            except Exception as e:
-                log.warning("自动关播异常: %s", e)
+        # B 站平台专属：自动关播
+        if self._active_platform == "bilibili":
+            bili_cookie = self._bili_cfg.get("cookie")
+            bili_room = self._bili_cfg.get("room_id")
+            if bili_cookie and bili_room:
+                try:
+                    log.info("停止推流，尝试向 B 站发送关播请求...")
+                    bili_api = BilibiliAPI(bili_room, bili_cookie)
+                    bili_api.stop_live()
+                except Exception as e:
+                    log.warning("自动关播异常: %s", e)
 
     @property
     def is_running(self) -> bool:
@@ -324,6 +324,7 @@ class Streamer:
                 "speed": self.speed,
                 "cpu_percent": cpu,
                 "memory_percent": mem,
+                "active_platform": self._active_platform,
             }
 
     # ── FFmpeg 命令构建 ───────────────────────────
@@ -380,8 +381,9 @@ class Streamer:
             
             # 引入防卡死探针：如果填写的是网络流媒体地址，务必提前探测它是否“真的存在”
             stream_alive = True
-            if is_rtsp and "mediamtx" in webcam_path.lower():
+            if is_rtsp and ("mediamtx" in webcam_path.lower() or "127.0.0.1" in webcam_path.lower() or "localhost" in webcam_path.lower()):
                 stream_alive = self._is_mediamtx_stream_alive("webcam")
+                log.info("🎥 探针结果: stream_alive=%s", stream_alive)
             
             # 如果是本地文件，检查是否存在；如果是网络流且探针确认活着，则将其编入 FFmpeg -i 输入
             if stream_alive and (is_rtsp or os.path.exists(webcam_path)):
@@ -466,7 +468,8 @@ class Streamer:
         rtmp_url = self.stream_cfg["rtmp_url"] + self.stream_cfg["stream_key"]
         return [
             "ffmpeg", "-y",
-            "-fflags", "+genpts+discardcorrupt",
+            "-fflags", "+genpts+discardcorrupt+igndts",
+            "-err_detect", "ignore_err",
             "-f", "mpegts", "-i", "pipe:0",
             "-c", "copy",
             "-flvflags", "no_duration_filesize",
@@ -577,16 +580,27 @@ class Streamer:
 
     def _is_mediamtx_stream_alive(self, path_name: str) -> bool:
         """探针检测 MediaMTX 内某个 stream 是否正处于推流活跃状态"""
+        # 优先尝试 MediaMTX REST API
         try:
-            # 假定与 MediaMTX 在同一 Docker network，使用 9997 API 端口
-            resp = requests.get(f"http://mediamtx:9997/v3/paths/get/{path_name}", timeout=2)
+            resp = requests.get(f"http://127.0.0.1:9997/v3/paths/get/{path_name}", timeout=2)
             if resp.status_code == 200:
                 data = resp.json()
-                # ready 代表目前已发布能够拉流（即主播端推流端在线）
                 if data.get("ready"):
                     return True
-        except Exception as e:
-            log.warning("探针探测 MediaMTX 失败: %s", e)
+        except Exception:
+            pass
+        
+        # fallback: 直接检测 RTSP 端口是否有响应（API 不可用时）
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(("127.0.0.1", 8554))
+            s.close()
+            log.info("📡 MediaMTX RTSP 端口可达，假定流活跃")
+            return True
+        except Exception:
+            pass
+        
         return False
 
     # 正则：匹配 FFmpeg 输出中的 Duration    # 匹配进度和时长（忽略挂机视频等其它的 stream 干扰）
@@ -621,24 +635,65 @@ class Streamer:
         threading.Thread(target=self._read_pusher_output, daemon=True).start()
 
     def _restart_pusher(self):
-        """重启推流器（推流码变更时调用）"""
-        log.info("🔄 主动触发重启推流器...")
-        self._start_pusher()
+        """无缝重启推流器 —— 先启新连接，再释放旧连接，实现丝滑切换"""
+        log.info("🔄 无缝切换推流器...")
+        old_pusher = self._pusher_process
+
+        # 1. 启动新推流器
+        cmd = self._build_pusher_cmd()
+        log.info("启动新推流器: %s", ' '.join(cmd)[:300])
+        self._last_pusher_heartbeat = time.time()
+        new_pusher = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+        # 2. 原子切换：_pipe_data 线程读取 self._pusher_process 会自动使用新进程
+        self._pusher_process = new_pusher
+        threading.Thread(target=self._read_pusher_output, daemon=True).start()
+        log.info("✅ 新推流器已就绪，正在关闭旧连接...")
+
+        # 3. 优雅关闭旧推流器
+        if old_pusher and old_pusher.poll() is None:
+            try:
+                old_pusher.stdin.close()
+            except Exception:
+                pass
+            old_pusher.terminate()
+            try:
+                old_pusher.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                old_pusher.kill()
+        log.info("✅ 平台切换完成")
 
     def _pipe_data(self):
-        """将解码器 stdout 管道传送到推流器 stdin"""
+        """将解码器 stdout 管道传送到推流器 stdin（含切换容错）"""
         try:
             while self._running:
                 chunk = self._process.stdout.read(65536)
                 if not chunk:
                     break
-                if self._pusher_process and self._pusher_process.poll() is None:
-                    try:
-                        self._pusher_process.stdin.write(chunk)
-                        self._pusher_process.stdin.flush()
-                    except (BrokenPipeError, OSError) as e:
-                        log.error("推流管道断开: %s", e)
-                        break
+                # 重试机制：推流器切换瞬间短暂等待新进程就绪
+                for attempt in range(3):
+                    pusher = self._pusher_process  # 取最新引用（切换时会原子替换）
+                    if pusher and pusher.poll() is None:
+                        try:
+                            pusher.stdin.write(chunk)
+                            pusher.stdin.flush()
+                            break
+                        except (BrokenPipeError, OSError):
+                            if attempt < 2:
+                                time.sleep(0.1)
+                                continue
+                            log.error("推流管道断开，已重试 3 次")
+                            return
+                    else:
+                        if attempt < 2:
+                            time.sleep(0.1)
+                        else:
+                            log.warning("推流器不可用，丢弃数据块")
         except Exception as e:
             log.warning("管道传输异常: %s", e)
         finally:
@@ -780,22 +835,18 @@ class Streamer:
             if not rtmp_ok: reason_parts.append("RTMP不可达")
             if not key_ok: reason_parts.append("推流码异常")
             if not live_ok: reason_parts.append("直播间未开播")
-            
-            is_bilibili = "bili" in self.stream_cfg.get("rtmp_url", "").lower()
-            
-            if is_bilibili and self._bili_cfg and self._bili_cfg.get("cookie"):
-                log.error("⛔ %s，准备尝试依靠后台自动重新开播...", "、".join(reason_parts))
-                reconnect_success = self._attempt_auto_restart()
-                if reconnect_success:
+
+            if self._active_platform == "bilibili" and self._bili_cfg.get("cookie"):
+                log.error("⛔ %s，准备尝试依靠 B 站 API 自动重新开播...", "、".join(reason_parts))
+                if self._attempt_auto_restart():
                     log.info("✅ 后台自动重新开播成功！推流程序将继续。")
-                    return False # 重新开播成功，不停止主循环推流
-                else:
-                    log.error("⛔ 自动重新开播失败，建议彻底停止推流")
-                    return True
+                    return False
+                log.error("⛔ 自动重新开播失败，建议彻底停止推流")
+                return True
             else:
-                log.error("⛔ %s。当前处于多平台特化防卡死模式，系统将跳过 B 站特有的抢救 API，仅做泛用的无头重连尝试。", "、".join(reason_parts))
+                log.error("⛔ %s [平台: %s]，将持续重试推流连接。", "、".join(reason_parts), self._active_platform)
                 return False
-                
+
         return False
 
     def _attempt_auto_restart(self) -> bool:
@@ -915,34 +966,58 @@ class Streamer:
         data = resp_json.get("data", {})
         rtmp_url = data.get("rtmp", {}).get("addr", "")
         rtmp_code = data.get("rtmp", {}).get("code", "")
-        
+
         if not rtmp_url or not rtmp_code:
             return False
-            
+
         with self._lock:
-            # 内部更新缓存的 stream 项属性
             self.stream_cfg["rtmp_url"] = rtmp_url
             self.stream_cfg["stream_key"] = rtmp_code
-            
-        # 并将其写入 config.yaml 文件持久化
+
+        self._persist_stream_config(rtmp_url, rtmp_code)
+        self._restart_pusher()
+        return True
+
+    def _persist_stream_config(self, rtmp_url: str, stream_key: str):
+        """将推流地址和推流码持久化到 config.yaml"""
         try:
             with open("config.yaml", "r", encoding="utf-8") as f:
                 full_config = yaml.safe_load(f)
-                
             full_config["stream"]["rtmp_url"] = rtmp_url
-            full_config["stream"]["stream_key"] = rtmp_code
-            
+            full_config["stream"]["stream_key"] = stream_key
             with open("config.yaml", "w", encoding="utf-8") as f:
                 yaml.dump(full_config, f, allow_unicode=True, sort_keys=False)
-                
-            log.info(f"✅ 新的推流地址已更新并保存在 config.yaml。")
-            # 重启推流器以使用新的 RTMP 地址
-            self._restart_pusher()
-            return True
+            log.info("✅ 推流配置已持久化到 config.yaml")
         except Exception as e:
-            log.error(f"❌ 写入 config.yaml 数据失败，但已暂时在内存中更新: {e}")
-            self._restart_pusher()
-            return True
+            log.error("❌ 写入 config.yaml 失败（内存中已更新）: %s", e)
+
+    def _persist_platform_config(self, platform: str, rtmp_url: str, stream_key: str, extra: dict | None = None):
+        """将指定平台的推流信息独立持久化到 config.yaml 对应节点"""
+        try:
+            with open("config.yaml", "r", encoding="utf-8") as f:
+                full_config = yaml.safe_load(f)
+
+            # 更新当前活跃流配置
+            full_config.setdefault("stream", {})
+            full_config["stream"]["rtmp_url"] = rtmp_url
+            full_config["stream"]["stream_key"] = stream_key
+            full_config["stream"]["active_platform"] = platform
+
+            # 同时将推流信息存入对应平台节点，方便日后切回时自动加载
+            if platform in ("huya", "custom"):
+                full_config.setdefault(platform, {})
+                full_config[platform]["rtmp_url"] = rtmp_url
+                full_config[platform]["stream_key"] = stream_key
+            if platform == "bilibili" and extra:
+                full_config.setdefault("bilibili", {})
+                for k, v in extra.items():
+                    full_config["bilibili"][k] = v
+
+            with open("config.yaml", "w", encoding="utf-8") as f:
+                yaml.dump(full_config, f, allow_unicode=True, sort_keys=False)
+            log.info("✅ 平台 [%s] 推流配置已持久化", platform)
+        except Exception as e:
+            log.error("❌ 持久化平台配置失败: %s", e)
 
     def _run_diagnosis(self) -> dict:
         """执行全部自检项目"""
@@ -1017,10 +1092,9 @@ class Streamer:
     def _check_live_status(self) -> dict:
         """通过 B 站 API 检查直播间是否正在直播"""
         name = "直播间状态"
-        
-        is_bilibili = "bili" in self.stream_cfg.get("rtmp_url", "").lower()
-        if not is_bilibili:
-            return {"id": "live_status", "name": name, "ok": True, "detail": "非 B 站特化推流，跳过自检"}
+
+        if self._active_platform != "bilibili":
+            return {"id": "live_status", "name": name, "ok": True, "detail": f"当前平台 [{self._active_platform}]，跳过 B 站自检"}
             
         room_id = self._bili_cfg.get("room_id") if self._bili_cfg else None
         if not room_id:

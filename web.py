@@ -260,6 +260,55 @@ async def save_overlay(request: Request, admin: dict = Depends(require_admin)):
     return {"ok": True, "msg": "画面设置已保存，下一个视频生效"}
 
 
+@app.get("/api/platform")
+async def get_platform(user: dict = Depends(get_current_user)):
+    stream = _config.get("stream", {}) if _config else {}
+    bili = _config.get("bilibili", {}) if _config else {}
+    huya = _config.get("huya", {}) if _config else {}
+    custom = _config.get("custom", {}) if _config else {}
+    return {"stream": stream, "bilibili": bili, "huya": huya, "custom": custom}
+
+
+@app.post("/api/platform")
+async def save_platform(request: Request, admin: dict = Depends(require_admin)):
+    body = await request.json()
+    platform = body.get("stream", {}).get("active_platform", "bilibili")
+
+    # 更新内存配置
+    if "stream" in body:
+        _config["stream"] = body["stream"]
+        if _streamer:
+            _streamer.stream_cfg = body["stream"]
+            _streamer._active_platform = platform
+    if "bilibili" in body:
+        _config["bilibili"] = body["bilibili"]
+        if _streamer:
+            _streamer._bili_cfg = body["bilibili"]
+    if "huya" in body:
+        _config["huya"] = body["huya"]
+    if "custom" in body:
+        _config["custom"] = body["custom"]
+
+    # 持久化：全量配置写入 + 各平台推流信息独立存档
+    _save_config()
+    if _streamer:
+        rtmp_url = body.get("stream", {}).get("rtmp_url", "")
+        stream_key = body.get("stream", {}).get("stream_key", "")
+        extra = body.get("bilibili") if platform == "bilibili" else None
+        _streamer._persist_platform_config(platform, rtmp_url, stream_key, extra)
+
+    log.info("Web 操作: 更新推流平台设置 [%s]", platform)
+
+    if _streamer and _streamer.is_running:
+        log.info("新配置准备生效，正在无缝切换推流器...")
+        t0 = time.time()
+        _streamer._restart_pusher()
+        elapsed = round((time.time() - t0) * 1000)
+        return {"ok": True, "msg": f"✅ 平台已无缝切换！耗时 {elapsed}ms", "elapsed_ms": elapsed}
+
+    return {"ok": True, "msg": "推流平台已保存（当前未推流）"}
+
+
 @app.post("/api/upload-logo")
 async def upload_logo(admin: dict = Depends(require_admin), file: UploadFile = File(...)):
     # 确保 images 目录存在

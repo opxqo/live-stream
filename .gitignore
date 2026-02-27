@@ -15,3 +15,7 @@ test_bili_api.py
 test_webdav.py
 
 webcam/
+
+mediamtx_bin/
+mtx.log
+mtx_err.log

@@ -1267,6 +1267,7 @@
       <button class="tab-btn active" onclick="switchTab('playlist')">播放列表</button>
       <button class="tab-btn" onclick="switchTab('browser')">目录浏览</button>
       <button class="tab-btn" onclick="switchTab('overlay')" id="tabOverlay" style="display:none">画面设置</button>
+      <button class="tab-btn" onclick="switchTab('platform')" id="tabPlatform" style="display:none">平台设置</button>
       <button class="tab-btn" onclick="switchTab('users')" id="tabUsers" style="display:none">用户管理</button>
     </div>
 
@@ -1283,6 +1284,61 @@
       <div class="breadcrumb" id="breadcrumb"></div>
       <div class="dir-list" id="dirList">
         <div class="loading">加载中...</div>
+      </div>
+    </div>
+
+    <!-- 推流平台 Tab -->
+    <div class="tab-panel" id="tab-platform">
+      <div class="card">
+        <div class="form-section">
+          <div class="form-section-title">🌐 直播平台选择</div>
+          <div class="form-grid">
+            <div class="form-group-sm form-group-full">
+              <label>请选择要推送的直播平台</label>
+              <select id="platformType" onchange="togglePlatformFields()">
+                <option value="bilibili">Bilibili (B站)</option>
+                <option value="huya">Huya (虎牙)</option>
+                <option value="custom">第三方/自定义平台 (RTMP)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 动态面板：B 站特供 -->
+          <div id="panelBilibili"
+            style="display: none; margin-top: 16px; border-top: 1px dashed var(--border); padding-top: 16px;">
+            <div class="form-group-sm form-group-full" style="margin-bottom: 12px;">
+              <label>B站 Cookie（依赖此获取开播码和自动重连）</label>
+              <input type="text" id="biliCookie" placeholder="填入 B 站网页版复制的完整 Cookie 字符串...">
+            </div>
+            <div class="form-group-sm">
+              <label>直播间 Room ID</label>
+              <input type="text" id="biliRoomId" placeholder="你的 B 站直播间数字 ID">
+            </div>
+            <div class="form-group-sm">
+              <label>推流分区 (Area ID)</label>
+              <input type="text" id="biliAreaId" value="33" placeholder="默认单机游戏: 33">
+            </div>
+          </div>
+
+          <!-- 动态面板：通用 RTMP (包含虎牙) -->
+          <div id="panelRtmp"
+            style="display: none; margin-top: 16px; border-top: 1px dashed var(--border); padding-top: 16px;">
+            <div class="form-group-sm form-group-full" style="margin-bottom: 12px;">
+              <label>RTMP 推流地址 (Server URL)</label>
+              <input type="text" id="rtmpUrl" placeholder="如: rtmp://tx.direct.huya.com/huyalive">
+            </div>
+            <div class="form-group-sm form-group-full">
+              <label>直播流密钥 (Stream Key)</label>
+              <input type="text" id="rtmpKey" placeholder="如: 1234567-1234567-abcdefg...">
+            </div>
+          </div>
+        </div>
+
+        <div class="save-bar">
+          <button class="btn btn-blue" id="btnSavePlatform" onclick="savePlatform()">💾 保存并切换平台</button>
+          <button class="btn btn-ghost" onclick="loadPlatform()" style="border:1px solid var(--border)">🔄 恢复原值</button>
+        </div>
+        <div class="meta-line">提示：正在直播时保存设置，推流器会无缝衔接新平台（不中断画面）</div>
       </div>
     </div>
 
@@ -1382,7 +1438,7 @@
           <div class="form-grid" id="webcamFields">
             <div class="form-group-sm form-group-full">
               <label>视频路径 (本地路径，或者 RTSP/RTMP 网络流地址)</label>
-              <input type="text" id="webcamPath" placeholder="rtsp://mediamtx:8554/webcam" oninput="refreshPreview()">
+              <input type="text" id="webcamPath" placeholder="rtsp://127.0.0.1:8554/webcam" oninput="refreshPreview()">
             </div>
             <div class="form-group-sm">
               <label>缩放高度 (px)</label>
@@ -1477,6 +1533,7 @@
           document.getElementById('btnStart').style.display = '';
           document.getElementById('tabUsers').style.display = '';
           document.getElementById('tabOverlay').style.display = '';
+          document.getElementById('tabPlatform').style.display = '';
         } else {
           badge.textContent = '房管';
           badge.className = 'role-badge role-mod';
@@ -1487,13 +1544,22 @@
     // ── Tab 切换 ──
     function switchTab(name) {
       const tabs = document.querySelectorAll('.tab-btn');
-      const panels = { playlist: 0, browser: 1, overlay: 2, users: 3 };
-      tabs.forEach((b, i) => b.classList.toggle('active', i === panels[name]));
+      tabs.forEach(b => {
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + name + "'")) {
+          b.classList.add('active');
+        } else {
+          b.classList.remove('active');
+        }
+      });
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      document.getElementById('tab-' + name).classList.add('active');
+      const targetPanel = document.getElementById('tab-' + name);
+      if (targetPanel) {
+        targetPanel.classList.add('active');
+      }
       if (name === 'browser') browseTo('/');
       if (name === 'users') fetchUsers();
       if (name === 'overlay') loadOverlay();
+      if (name === 'platform') loadPlatform();
     }
 
     // ── 状态轮询 ──
@@ -1691,6 +1757,145 @@
         renderOverlayForm();
       } catch (e) { console.error(e); }
     }
+
+    // ── 推流平台设置 ──
+    let platformData = { stream: {}, bilibili: {}, huya: {}, custom: {} };
+
+    async function loadPlatform() {
+      try {
+        const res = await fetch('/api/platform');
+        if (!res.ok) return;
+        platformData = await res.json();
+
+        // 如果后端以前没有这些字段，做一下容错预设
+        platformData.bilibili = platformData.bilibili || {};
+        platformData.huya = platformData.huya || {};
+        platformData.custom = platformData.custom || {};
+        const stm = platformData.stream || {};
+
+        // 识别当前的工作模式，如果没有 active_platform 则向下兼容依据 url 猜
+        let pType = stm.active_platform;
+        if (!pType) {
+          const r_url = (stm.rtmp_url || '').toLowerCase();
+          pType = 'bilibili';
+          if (!r_url.includes('bilibili') && r_url) {
+            pType = r_url.includes('huya') ? 'huya' : 'custom';
+          }
+        }
+        document.getElementById('platformType').value = pType;
+
+        // 填入 B 站表单
+        document.getElementById('biliCookie').value = platformData.bilibili.cookie || '';
+        document.getElementById('biliRoomId').value = platformData.bilibili.room_id || '';
+        document.getElementById('biliAreaId').value = platformData.bilibili.area_id || '33';
+
+        // 绑定通用 RTMP 表单。如果是对应平台，则赋予其专属记忆；如果它刚巧是当前 active 的平台，则赋予直营 stream 里面的值，但也保持用记忆填补
+        let targetUrl = '';
+        let targetKey = '';
+
+        if (pType === 'huya') {
+          targetUrl = stm.rtmp_url || platformData.huya.rtmp_url || '';
+          targetKey = stm.stream_key || platformData.huya.stream_key || '';
+        } else if (pType === 'custom') {
+          targetUrl = stm.rtmp_url || platformData.custom.rtmp_url || '';
+          targetKey = stm.stream_key || platformData.custom.stream_key || '';
+        }
+
+        document.getElementById('rtmpUrl').value = targetUrl;
+        document.getElementById('rtmpKey').value = targetKey;
+
+        togglePlatformFields();
+      } catch (e) { console.error('加载平台配置失败', e); }
+    }
+
+    function togglePlatformFields() {
+      const pType = document.getElementById('platformType').value;
+      const isBili = (pType === 'bilibili');
+
+      // 切换显示逻辑
+      document.getElementById('panelBilibili').style.display = isBili ? 'block' : 'none';
+      document.getElementById('panelRtmp').style.display = !isBili ? 'block' : 'none';
+
+      // 根据选择填充输入框，避免残留别的平台的码
+      if (!isBili) {
+        let targetUrl = '';
+        let targetKey = '';
+
+        if (pType === 'huya' && platformData.huya) {
+          targetUrl = platformData.huya.rtmp_url || '';
+          targetKey = platformData.huya.stream_key || '';
+        } else if (pType === 'custom' && platformData.custom) {
+          targetUrl = platformData.custom.rtmp_url || '';
+          targetKey = platformData.custom.stream_key || '';
+        }
+
+        document.getElementById('rtmpUrl').value = targetUrl;
+        document.getElementById('rtmpKey').value = targetKey;
+      }
+    }
+
+    async function savePlatform() {
+      const btn = document.getElementById('btnSavePlatform');
+      const origText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ 切换中...';
+
+      const pType = document.getElementById('platformType').value;
+      const isBili = (pType === 'bilibili');
+
+      let payload = {
+        stream: { ...platformData.stream, active_platform: pType },
+        bilibili: platformData.bilibili || {},
+        huya: platformData.huya || {},
+        custom: platformData.custom || {}
+      };
+
+      // 无论当前切没切到 B 站，B站表单的数据均做存档
+      payload.bilibili.cookie = document.getElementById('biliCookie').value.trim();
+      payload.bilibili.room_id = parseInt(document.getElementById('biliRoomId').value.trim()) || 0;
+      payload.bilibili.area_id = parseInt(document.getElementById('biliAreaId').value.trim()) || 33;
+
+      const r_url_input = document.getElementById('rtmpUrl').value.trim();
+      const r_key_input = document.getElementById('rtmpKey').value.trim();
+
+      if (isBili) {
+        // B 站模式下：将当前使用的流替换为 B 站占位符
+        payload.stream.rtmp_url = "rtmp://live-push.bilibili.com";
+        payload.stream.stream_key = "AUTO_GENERATED";
+        // 既然目前选的是 B 站，对于不可见的 RTMP 框，无需存档以免误存空值
+      } else {
+        // 非 B 站模式下 (huya / custom)：将当前流赋予输入框内容
+        payload.stream.rtmp_url = r_url_input;
+        payload.stream.stream_key = r_key_input;
+
+        // 给特定平台存档，以便日后切换回来时仍能载入
+        if (pType === 'huya') {
+          payload.huya.rtmp_url = r_url_input;
+          payload.huya.stream_key = r_key_input;
+        } else if (pType === 'custom') {
+          payload.custom.rtmp_url = r_url_input;
+          payload.custom.stream_key = r_key_input;
+        }
+      }
+
+      try {
+        const res = await fetch('/api/platform', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await res.json();
+        showToast(d.msg);
+        // 刷新本地缓存
+        platformData = { stream: payload.stream, bilibili: payload.bilibili, huya: payload.huya, custom: payload.custom };
+      } catch (e) {
+        showToast('保存平台配置遭遇网络错误');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = origText;
+      }
+    }
+
 
     // 颜色预设列表
     const COLOR_PRESETS = [
