@@ -56,13 +56,13 @@ class BilibiliAPI:
             'ts': int(time.time()),
         }
 
-    def start_live(self) -> Tuple[bool, Optional[str], Optional[str], str]:
+    def start_live(self) -> Tuple[bool, Optional[str], Optional[str], str, Optional[str]]:
         """
         开启直播房
-        :return: (is_success, rtmp_url, stream_key, message)
+        :return: (is_success, rtmp_url, stream_key, message, qr_url_if_face_auth)
         """
         if not self.csrf:
-            return False, None, None, "Cookie 中缺少 bili_jct (csrf)，无法鉴权"
+            return False, None, None, "Cookie 中缺少 bili_jct (csrf)，无法鉴权", None
 
         data = self._get_base_data()
         data['area_v2'] = '624'  # 默认单机游戏分类，可在此更改
@@ -84,14 +84,38 @@ class BilibiliAPI:
                 rtmp_addr = resp['data']['rtmp']['addr']
                 stream_key = resp['data']['rtmp']['code']
                 log.info("B 站开播成功! RTMP: %s", rtmp_addr)
-                return True, rtmp_addr, stream_key, "开播成功"
+                return True, rtmp_addr, stream_key, "开播成功", None
+            elif resp.get('code') == 60024 or (resp.get('data') and resp['data'].get('qr')):
+                qr_url = resp.get('data', {}).get('qr', '')
+                msg = "需要人脸认证"
+                log.warning("B 站开播需要人脸认证: qr=%s", qr_url)
+                return False, None, None, msg, qr_url
             else:
                 msg = resp.get('message') or resp.get('msg') or str(resp)
                 log.error("B 站开播失败: %s", msg)
-                return False, None, None, f"接口返回错误: {msg}"
+                return False, None, None, f"接口返回错误: {msg}", None
         except Exception as e:
             log.exception("请求 B 站开播接口异常")
-            return False, None, None, f"请求异常: {str(e)}"
+            return False, None, None, f"请求异常: {str(e)}", None
+
+    def check_face_auth(self) -> bool:
+        """检查人脸认证是否已完成"""
+        headers = {**self.common_headers, 'X-Event-TraceID': generate_trace_id()}
+        data = {
+            'room_id': self.room_id,
+            'face_auth_code': '60024',
+            'csrf_token': self.csrf,
+            'csrf': self.csrf,
+            'visit_id': ''
+        }
+        try:
+            resp = requests.post(
+                'https://api.live.bilibili.com/xlive/app-blink/v1/preLive/IsUserIdentifiedByFaceAuth',
+                headers=headers, data=data, timeout=5
+            ).json()
+            return resp.get('code') == 0 and resp.get('data', {}).get('is_identified', False)
+        except Exception:
+            return False
 
     def stop_live(self) -> Tuple[bool, str]:
         """

@@ -75,13 +75,6 @@ class Streamer:
         if self._running:
             return
 
-        if not self._font_path:
-            self._font_path = self._find_font()
-            if self._font_path:
-                log.info("Using font: %s", self._font_path)
-            else:
-                log.warning("No font found! OSD might fail.")
-
         self._running = True
         self.start_time = datetime.now()
         self._total_failures = 0
@@ -107,7 +100,7 @@ class Streamer:
             if bili_cookie and bili_room:
                 log.info("检测到 B 站 Cookie，正在自动请求开播...")
                 bili_api = BilibiliAPI(bili_room, bili_cookie)
-                ok, url, code, msg = bili_api.start_live()
+                ok, url, code, msg, _qr = bili_api.start_live()
                 if ok and url and code:
                     with self._lock:
                         self.stream_cfg["rtmp_url"] = url
@@ -852,128 +845,74 @@ class Streamer:
     def _attempt_auto_restart(self) -> bool:
         """尝试使用 B 站 API 获取新的推流码进行恢复"""
         room_id = self._bili_cfg.get("room_id")
-        area_id = self._bili_cfg.get("area_id")
         cookie_str = self._bili_cfg.get("cookie", "")
         
-        match = re.search(r"bili_jct=([^;]+)", cookie_str)
-        if not match:
-            log.error("Cookie 中未找到 bili_jct (csrf_token)")
+        if not room_id or not cookie_str:
+            log.error("缺少 room_id 或 cookie，无法自动重连")
             return False
-        csrf = match.group(1)
         
-        url = "https://api.live.bilibili.com/room/v1/Room/startLive"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Cookie": cookie_str,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            "Origin": "https://link.bilibili.com",
-            "Referer": "https://link.bilibili.com/p/center/index"
-        }
-        
-        data = {
-            "room_id": room_id,
-            "platform": "pc_link",
-            "area_v2": area_id,
-            "backup_stream": "0",
-            "csrf_token": csrf,
-            "csrf": csrf
-        }
+        bili_api = BilibiliAPI(room_id, cookie_str)
         
         log.info("🔄 正在请求 B 站开启直播...")
-        try:
-            resp = requests.post(url, headers=headers, data=data, timeout=10)
-            resp_json = resp.json()
-            
-            # code 0 直接成功
-            if resp_json.get("code") == 0:
-                return self._apply_new_stream_config(resp_json)
-                
-            # code 60024 需要人脸认证
-            elif resp_json.get("code") == 60024 or (resp_json.get("data") and resp_json["data"].get("qr")):
-                qr_url = resp_json["data"].get("qr", "")
-                log.warning("⚠️ 目标分区需要人脸认证，请查收邮件并扫码")
-                
-                # 发送邮件通知附带二维码地址
-                qr_html = f'''
-                <div style="background:#fff;padding:20px;border-radius:8px;text-align:center">
-                    <h2 style="color:#fb7299">系统触发了重新开播，但需要进行人脸认证</h2>
-                    <p style="color:#666">请用手机浏览器的扫一扫或者 B 站 APP 扫描并在手机端完成认证：</p>
-                    <div style="margin:20px 0;">
-                        <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(qr_url)}" alt="二维码" />
-                    </div>
-                    <p style="color:#999;font-size:12px;">如果无法显示图片，请直接复制这串链接去浏览器打开获取最新认证二维码：<br>{qr_url}</p>
+        ok, url, code, msg, qr_url = bili_api.start_live()
+        
+        if ok and url and code:
+            return self._apply_new_stream_config_direct(url, code)
+        
+        # 需要人脸认证
+        if qr_url:
+            log.warning("⚠️ 目标分区需要人脸认证，请查收邮件并扫码")
+            qr_html = f'''
+            <div style="background:#fff;padding:20px;border-radius:8px;text-align:center">
+                <h2 style="color:#fb7299">系统触发了重新开播，但需要进行人脸认证</h2>
+                <p style="color:#666">请用手机浏览器的扫一扫或者 B 站 APP 扫描并在手机端完成认证：</p>
+                <div style="margin:20px 0;">
+                    <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(qr_url)}" alt="二维码" />
                 </div>
-                '''
-                self._notify_email("⚠️ 直播推流断线: 待人脸认证恢复", qr_html, is_html=True)
-                
-                # 轮询人脸认证状态
-                face_auth_url = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/IsUserIdentifiedByFaceAuth"
-                face_auth_data = {
-                    "room_id": room_id,
-                    "face_auth_code": "60024",
-                    "csrf_token": csrf,
-                    "csrf": csrf,
-                    "visit_id": ""
-                }
-                
-                is_verified = False
-                max_attempts = 120 # 允许最多等待 120 秒，给你留出看邮件的时间
-                attempts = 0
-                
-                log.info("⏳ 开始轮询人脸认证结果 (超时时间 120 秒)...")
-                while not is_verified and attempts < max_attempts:
-                    if not self._running:
-                        return False # 如果用户手动点击了关闭就提前终止
-                        
-                    try:
-                        auth_resp = requests.post(face_auth_url, headers=headers, data=face_auth_data, timeout=5)
-                        auth_json = auth_resp.json()
-                        if auth_json.get("code") == 0 and auth_json.get("data", {}).get("is_identified"):
-                            log.info("✅ 检测到扫码人脸验证成功！继续开播流程")
-                            is_verified = True
-                            break
-                    except Exception as e:
-                        pass
-                    
-                    time.sleep(1)
-                    attempts += 1
-                    
-                if is_verified:
+                <p style="color:#999;font-size:12px;">如果无法显示图片，请直接复制这串链接去浏览器打开获取最新认证二维码：<br>{qr_url}</p>
+            </div>
+            '''
+            self._notify_email("⚠️ 直播推流断线: 待人脸认证恢复", qr_html, is_html=True)
+            
+            # 轮询人脸认证状态
+            log.info("⏳ 开始轮询人脸认证结果 (超时时间 120 秒)...")
+            for attempt in range(120):
+                if not self._running:
+                    return False
+                if bili_api.check_face_auth():
+                    log.info("✅ 检测到扫码人脸验证成功！继续开播流程")
                     # 重新调用 startLive
                     log.info("🔄 再次请求 B 站开启直播...")
-                    resp2 = requests.post(url, headers=headers, data=data, timeout=10)
-                    resp_json2 = resp2.json()
-                    
-                    if resp_json2.get("code") == 0:
-                        self._notify_email("✅ 直播推流断线并重新开播成功", "系统检测到人脸验证通过，已成功获取到新的推流码，进程将自动恢复推流！", is_html=False)
-                        return self._apply_new_stream_config(resp_json2)
+                    ok2, url2, code2, msg2, _ = bili_api.start_live()
+                    if ok2 and url2 and code2:
+                        self._notify_email("✅ 直播推流断线并重新开播成功", 
+                                          "系统检测到人脸验证通过，已成功获取到新的推流码，进程将自动恢复推流！")
+                        return self._apply_new_stream_config_direct(url2, code2)
                     else:
-                        log.error(f"❌ 二次开播依然失败: {resp_json2}")
+                        log.error("❌ 二次开播依然失败: %s", msg2)
                         return False
-                else:
-                    log.error("❌ 人脸扫描验证超时，重连宣告失败")
-                    return False
-            else:
-                log.error(f"❌ 开播请求失败: {resp_json}")
-                return False
-                
-        except Exception as e:
-            log.error(f"自动重连过程遇到错误: {e}")
+                time.sleep(1)
+            
+            log.error("❌ 人脸扫描验证超时，重连宣告失败")
             return False
+        
+        log.error("❌ 开播请求失败: %s", msg)
+        return False
             
     def _apply_new_stream_config(self, resp_json: dict) -> bool:
         """解析新的推流地址并热更到配置"""
         data = resp_json.get("data", {})
         rtmp_url = data.get("rtmp", {}).get("addr", "")
         rtmp_code = data.get("rtmp", {}).get("code", "")
-
         if not rtmp_url or not rtmp_code:
             return False
+        return self._apply_new_stream_config_direct(rtmp_url, rtmp_code)
 
+    def _apply_new_stream_config_direct(self, rtmp_url: str, rtmp_code: str) -> bool:
+        """将新推流地址热更到配置并重启推流器"""
         with self._lock:
             self.stream_cfg["rtmp_url"] = rtmp_url
             self.stream_cfg["stream_key"] = rtmp_code
-
         self._persist_stream_config(rtmp_url, rtmp_code)
         self._restart_pusher()
         return True

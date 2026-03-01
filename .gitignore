@@ -1,21 +1,27 @@
 __pycache__/
 *.pyc
+.env
+.venv/
+venv/
+
+# 运行时 & 日志
 config.yaml
 users.json
 progress.json
+*.log
+RunLog.txt
+recent_log.txt
+
+# 图片资源（非代码资产）
 *.png
 *.jpg
 *.jpeg
 *.gif
-.env
-.venv/
-venv/
+
+# 调试产物
 bili_debug_*.txt
-test_bili_api.py
-test_webdav.py
 
+# 外部工具
 webcam/
-
 mediamtx_bin/
-mtx.log
-mtx_err.log
+images/

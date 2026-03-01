@@ -1,7 +1,9 @@
 """B 站 24 小时推流服务入口"""
 
+import atexit
 import logging
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +71,34 @@ def build_sources(config: dict) -> list:
     return sources
 
 
+def start_mediamtx(config: dict) -> subprocess.Popen | None:
+    """当 webcam 启用且本地有 mediamtx 时，自动启动 MediaMTX"""
+    webcam = config.get("webcam", {})
+    if not webcam.get("enabled"):
+        return None
+
+    exe = Path("mediamtx_bin/mediamtx.exe")
+    yml = Path("mediamtx.yml")
+    if not exe.exists():
+        log.warning("未找到 %s，跳过 MediaMTX 启动（webcam 可能不可用）", exe)
+        return None
+
+    args = [str(exe)]
+    if yml.exists():
+        args.append(str(yml))
+
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log.info("MediaMTX 已启动 (PID %d)", proc.pid)
+
+    def cleanup():
+        if proc.poll() is None:
+            proc.terminate()
+            log.info("MediaMTX 已停止")
+    atexit.register(cleanup)
+
+    return proc
+
+
 def main():
     config = load_config()
 
@@ -78,6 +108,9 @@ def main():
         log.error("推流码未配置！请在 config.yaml 中填写 B 站推流地址和推流码")
         log.info("获取地址: https://link.bilibili.com/p/center/index#/my-room/start-live")
         sys.exit(1)
+
+    # 启动 MediaMTX（webcam RTSP 中转）
+    mtx_proc = start_mediamtx(config)
 
     sources = build_sources(config)
     playlist = Playlist(
@@ -96,6 +129,8 @@ def main():
     def handle_signal(signum, frame):
         log.info("收到信号 %d，正在停止...", signum)
         streamer.stop()
+        if mtx_proc and mtx_proc.poll() is None:
+            mtx_proc.terminate()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
