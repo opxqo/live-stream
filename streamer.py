@@ -384,7 +384,15 @@ class Streamer:
                 
                 # 网络流专用的极致防波动的安全拉流参数，并且保证不管死活都不阻塞主视频播放
                 if is_rtsp:
-                    cmd += ["-thread_queue_size", "2048", "-timeout", "5000000", "-i", webcam_path]
+                    cmd += [
+                        "-rtsp_transport", "tcp",          # 强制 TCP，避免 UDP 丢包花屏
+                        "-fflags", "+discardcorrupt",       # 丢弃损坏帧
+                        "-analyzeduration", "2000000",      # 2秒探测，确保从关键帧开始
+                        "-probesize", "2000000",            # 2MB 探测缓冲
+                        "-thread_queue_size", "2048",
+                        "-timeout", "5000000",
+                        "-i", webcam_path,
+                    ]
                     log.info("📡 接通实时画中画信源: %s (input %d)", webcam_path, webcam_input_idx)
                 else:
                     cmd += ["-stream_loop", "-1", "-i", webcam_path]
