@@ -3,14 +3,32 @@ __pycache__
 .git
 .gitignore
 *.md
-台标.*
-bilibili.js
+*.log
+RunLog.txt
+recent_log.txt
+
+# 测试 & 调试
 test_*.py
 bili_debug_*.txt
+
+# Docker 相关（不需要打进镜像）
 docker-compose.yml
+Dockerfile
+.dockerignore
+
+# 运行时文件（通过 volume 挂载）
+config.yaml
 progress.json
 users.json
-config.yaml
-.env
 images/
 webcam/
+
+# 本地专用的 MediaMTX（Docker 用独立容器）
+mediamtx_bin/
+mediamtx.yml
+
+# 其他
+.env
+.venv/
+.gemini/
+.agents/
