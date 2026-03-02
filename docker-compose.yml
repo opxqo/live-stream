@@ -13,6 +13,7 @@ services:
       - /opt/docker/live-stream/webcam:/app/webcam
       # 存放台标和所有叠加图片的文件夹
       - /opt/docker/live-stream/images:/app/images
+      - /opt/docker/live-stream/videos:/app/videos
       - /opt/docker/live-stream/progress.json:/app/progress.json
       - /opt/docker/live-stream/users.json:/app/users.json
     depends_on:

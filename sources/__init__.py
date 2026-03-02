@@ -14,8 +14,10 @@ class VideoItem:
 
 class VideoSource(ABC):
     """视频来源抽象基类"""
+    name: str = ""  # 源的显示名称
 
     @abstractmethod
     def list_videos(self) -> list[VideoItem]:
         """列举所有可用视频"""
         ...
+

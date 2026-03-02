@@ -15,7 +15,9 @@ PROGRESS_FILE = Path("progress.json")
 
 class Playlist:
     def __init__(self, sources: list[VideoSource], mode: str = "sequential"):
-        self.sources = sources
+        self.all_sources = sources  # 全部源
+        self.sources = sources      # 当前激活的源列表
+        self._active_source_name: str = sources[0].name if sources else ""
         self.mode = mode
         self._videos: list[VideoItem] = []
         self._index = 0
@@ -91,6 +93,28 @@ class Playlist:
     def total(self) -> int:
         with self._lock:
             return len(self._videos)
+
+    def switch_source(self, name: str) -> bool:
+        """按名称切换到指定视频源"""
+        for source in self.all_sources:
+            if source.name == name:
+                self.sources = [source]
+                self._active_source_name = name
+                self.reload()
+                log.info("已切换视频源: %s -> %d 个视频", name, self.total)
+                return True
+        log.warning("未找到视频源: %s", name)
+        return False
+
+    @property
+    def source_names(self) -> list[str]:
+        """返回所有可用的源名称"""
+        return [s.name for s in self.all_sources]
+
+    @property
+    def active_source(self) -> str:
+        """返回当前激活的源名称"""
+        return self._active_source_name
 
     def switch_path(self, new_path: str):
         """切换 WebDAV 源的播放路径并重新加载"""

@@ -184,6 +184,18 @@ async def start_stream(admin: dict = Depends(require_admin)):
     return {"ok": True, "msg": "推流已启动"}
 
 
+@app.post("/api/seek")
+async def seek_position(request: Request, user: dict = Depends(get_current_user)):
+    if not _streamer:
+        return {"ok": False, "msg": "推流未初始化"}
+    body = await request.json()
+    position = float(body.get("position", 0))
+    if _streamer.seek(position):
+        log.info("Web 操作: 跳转到 %.1f 秒", position)
+        return {"ok": True, "msg": f"已跳转到 {int(position // 60)}:{int(position % 60):02d}"}
+    return {"ok": False, "msg": "跳转失败（推流未运行）"}
+
+
 @app.get("/api/browse")
 async def browse_dir(path: str = "/", user: dict = Depends(get_current_user)):
     if not _streamer:
@@ -205,6 +217,33 @@ async def switch_dir(path: str = "/", user: dict = Depends(get_current_user)):
     return {"ok": True, "msg": f"已切换到 {path}，共 {_streamer.playlist.total} 个视频"}
 
 
+# ── 视频源切换 API ──
+
+@app.get("/api/sources")
+async def get_sources(user: dict = Depends(get_current_user)):
+    if not _streamer:
+        raise HTTPException(status_code=503, detail="推流服务未初始化")
+    return {
+        "sources": _streamer.playlist.source_names,
+        "active": _streamer.playlist.active_source,
+    }
+
+
+@app.post("/api/sources")
+async def switch_source(request: Request, user: dict = Depends(get_current_user)):
+    if not _streamer:
+        return {"ok": False, "msg": "推流未初始化"}
+    body = await request.json()
+    name = body.get("name", "")
+    if not name:
+        return {"ok": False, "msg": "缺少源名称"}
+    if _streamer.playlist.switch_source(name):
+        _streamer.skip()
+        log.info("Web 操作: 切换视频源到 %s", name)
+        return {"ok": True, "msg": f"已切换到 {name}，共 {_streamer.playlist.total} 个视频"}
+    return {"ok": False, "msg": f"未找到视频源: {name}"}
+
+
 # ── 画面设置 API（仅 admin） ──
 
 def _save_config():
@@ -220,7 +259,8 @@ async def get_overlay(user: dict = Depends(get_current_user)):
     clock = _config.get("clock", {}) if _config else {}
     images = _config.get("images", []) if _config else []
     webcam = _config.get("webcam", {}) if _config else {}
-    return {"logo": logo, "overlay": overlay, "clock": clock, "images": images, "webcam": webcam}
+    transition = _config.get("transition", {}) if _config else {}
+    return {"logo": logo, "overlay": overlay, "clock": clock, "images": images, "webcam": webcam, "transition": transition}
 
 
 @app.post("/api/overlay")
@@ -248,6 +288,10 @@ async def save_overlay(request: Request, admin: dict = Depends(require_admin)):
         _config["webcam"] = body["webcam"]
         if _streamer:
             _streamer.webcam_cfg = body["webcam"]
+    if "transition" in body:
+        _config["transition"] = body["transition"]
+        if _streamer:
+            _streamer.transition_cfg = body["transition"]
 
     _save_config()
     log.info("Web 操作: 更新画面设置")

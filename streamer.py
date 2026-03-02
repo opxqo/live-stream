@@ -34,6 +34,7 @@ class Streamer:
         self.images_cfg = config.get("images", [])
         self.webcam_cfg = config.get("webcam", {})  # 挂机视频画中画
         self.clock_cfg = config.get("clock", {})
+        self.transition_cfg = config.get("transition", {})
         self.resilience = config.get("resilience", {})
         self.email_cfg = config.get("email", {})
 
@@ -172,6 +173,7 @@ class Streamer:
                     if self._skip_requested:
                         self._skip_requested = False
                         log.info("⏭ 用户操作，切换视频")
+                        self._play_transition()
                         break
 
                     # 用户拖动进度条跳转，以新位置重启解码器
@@ -186,6 +188,7 @@ class Streamer:
                         with self._lock:
                             self.videos_played += 1
                         self._total_failures = 0
+                        self._play_transition()
                         break
 
                     video_retry += 1
@@ -267,6 +270,66 @@ class Streamer:
         if self._process.poll() is None:
             self._process.terminate()
         return True
+
+    def _play_transition(self):
+        """播放过渡内容（图片/视频），填充切集间隙"""
+        trans_type = self.transition_cfg.get("type", "image")
+        trans_path = self.transition_cfg.get("path", "")
+        trans_duration = self.transition_cfg.get("duration", 5)
+
+        # 默认使用台标
+        if not trans_path or not os.path.exists(trans_path):
+            trans_path = self.logo_cfg.get("path", "") if self.logo_cfg else ""
+            trans_type = "image"
+
+        if not trans_path or not os.path.exists(trans_path):
+            log.info("无过渡素材，跳过过渡")
+            return
+
+        w = self.video_cfg.get("width", 1920)
+        h = self.video_cfg.get("height", 1080)
+        fps = self.video_cfg.get("fps", 30)
+
+        if trans_type == "video":
+            cmd = [
+                "ffmpeg", "-y",
+                "-re", "-i", trans_path,
+                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-r", str(fps),
+                "-an",  # 过渡视频静音，避免音频格式切换问题
+                "-f", "mpegts", "pipe:1",
+            ]
+        else:
+            # 图片模式：生成静态画面
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-t", str(trans_duration),
+                "-i", trans_path,
+                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-r", str(fps),
+                "-f", "mpegts", "pipe:1",
+            ]
+
+        log.info("🎬 播放过渡内容: %s (%s)", trans_path, trans_type)
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            while self._running:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                pusher = self._pusher_process
+                if pusher and pusher.poll() is None:
+                    try:
+                        pusher.stdin.write(chunk)
+                        pusher.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        break
+            proc.wait(timeout=3)
+            log.info("🎬 过渡内容播放完毕")
+        except Exception as e:
+            log.warning("过渡播放异常: %s", e)
 
     def stop(self):
         """停止推流"""

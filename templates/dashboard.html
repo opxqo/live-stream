@@ -209,7 +209,14 @@
       height: 6px;
       background: var(--muted);
       border-radius: 3px;
-      overflow: hidden;
+      overflow: visible;
+      cursor: pointer;
+      position: relative;
+      transition: height 0.15s;
+    }
+
+    .progress-bg:hover {
+      height: 10px;
     }
 
     .progress-fg {
@@ -218,6 +225,26 @@
       background: var(--primary);
       border-radius: 3px;
       transition: width 0.6s ease;
+      pointer-events: none;
+    }
+
+    .progress-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--primary);
+      border: 2px solid #fff;
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      opacity: 0;
+      transition: opacity 0.15s;
+      pointer-events: none;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    }
+
+    .progress-bg:hover .progress-thumb {
+      opacity: 1;
     }
 
     /* ── 监控卡片 ── */
@@ -1233,8 +1260,9 @@
           <span id="pTime">00:00 / 00:00</span>
           <span id="pPercent">0%</span>
         </div>
-        <div class="progress-bg">
+        <div class="progress-bg" id="progressBg" onmousedown="startSeek(event)">
           <div class="progress-fg" id="pBar"></div>
+          <div class="progress-thumb" id="pThumb"></div>
         </div>
       </div>
     </div>
@@ -1275,6 +1303,9 @@
     <div class="tab-panel active" id="tab-playlist">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <span style="font-size:13px;color:var(--muted-foreground)" id="epCount"></span>
+        <select id="sourceSelect" onchange="switchSource(this.value)"
+          style="height:32px;padding:0 10px;background:var(--background);border:1px solid var(--input);border-radius:var(--radius);color:var(--foreground);font-size:13px;font-family:inherit;outline:none;cursor:pointer;min-width:120px">
+        </select>
       </div>
       <div class="playlist" id="playlist"></div>
     </div>
@@ -1460,6 +1491,30 @@
         </div>
       </div>
 
+      <!-- 切集过渡设置 -->
+      <div class="card">
+        <div class="form-section">
+          <div class="form-section-title">🎬 切集过渡</div>
+          <div class="form-grid">
+            <div class="form-group-sm">
+              <label>过渡类型</label>
+              <select id="transType">
+                <option value="image">图片（默认台标）</option>
+                <option value="video">视频</option>
+              </select>
+            </div>
+            <div class="form-group-sm" id="transDurationGroup">
+              <label>显示时长（秒）</label>
+              <input type="number" id="transDuration" value="5" min="1" max="30">
+            </div>
+            <div class="form-group-sm form-group-full">
+              <label>过渡素材路径（留空则使用台标）</label>
+              <input type="text" id="transPath" placeholder="如: images/过渡.mp4 或 images/过渡.png">
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 时钟设置 -->
       <div class="card">
         <div class="form-section">
@@ -1562,6 +1617,64 @@
       if (name === 'platform') loadPlatform();
     }
 
+    // ── 进度条拖动跳转 ──
+    let isSeeking = false;
+    let currentDuration = 0;
+
+    function startSeek(e) {
+      if (currentDuration <= 0) {
+        showToast('视频加载中，请稍后再拖动');
+        return;
+      }
+      isSeeking = true;
+      document.getElementById('pBar').style.transition = 'none';
+      updateSeekPosition(e);
+      document.addEventListener('mousemove', onSeekMove);
+      document.addEventListener('mouseup', onSeekEnd);
+    }
+
+    function onSeekMove(e) {
+      if (!isSeeking) return;
+      updateSeekPosition(e);
+    }
+
+    function updateSeekPosition(e) {
+      const bar = document.getElementById('progressBg');
+      const rect = bar.getBoundingClientRect();
+      let ratio = (e.clientX - rect.left) / rect.width;
+      ratio = Math.max(0, Math.min(1, ratio));
+      const pct = ratio * 100;
+      document.getElementById('pBar').style.width = pct + '%';
+      document.getElementById('pThumb').style.left = pct + '%';
+      document.getElementById('pThumb').style.opacity = '1';
+      document.getElementById('pPercent').textContent = pct.toFixed(1) + '%';
+      const targetTime = ratio * currentDuration;
+      document.getElementById('pTime').textContent = fmtTime(targetTime) + ' / ' + fmtTime(currentDuration);
+    }
+
+    async function onSeekEnd(e) {
+      if (!isSeeking) return;
+      document.removeEventListener('mousemove', onSeekMove);
+      document.removeEventListener('mouseup', onSeekEnd);
+      const bar = document.getElementById('progressBg');
+      const rect = bar.getBoundingClientRect();
+      let ratio = (e.clientX - rect.left) / rect.width;
+      ratio = Math.max(0, Math.min(1, ratio));
+      const position = ratio * currentDuration;
+      isSeeking = false;
+      document.getElementById('pBar').style.transition = '';
+      document.getElementById('pThumb').style.opacity = '';
+      try {
+        const res = await fetch('/api/seek', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ position })
+        });
+        const d = await res.json();
+        showToast(d.msg);
+      } catch (e) { showToast('跳转失败'); }
+    }
+
     // ── 状态轮询 ──
     async function fetchStatus() {
       try {
@@ -1581,9 +1694,13 @@
           document.getElementById('btnStart').disabled = d.running;
         }
         const pct = d.progress || 0;
-        document.getElementById('pBar').style.width = pct + '%';
-        document.getElementById('pPercent').textContent = pct.toFixed(1) + '%';
-        document.getElementById('pTime').textContent = fmtTime(d.current_time) + ' / ' + fmtTime(d.duration);
+        if (!isSeeking) {
+          document.getElementById('pBar').style.width = pct + '%';
+          document.getElementById('pThumb').style.left = pct + '%';
+          document.getElementById('pPercent').textContent = pct.toFixed(1) + '%';
+          document.getElementById('pTime').textContent = fmtTime(d.current_time) + ' / ' + fmtTime(d.duration);
+        }
+        currentDuration = d.duration || 0;
         document.getElementById('mCpu').textContent = (d.cpu_percent || 0).toFixed(1) + '%';
         document.getElementById('mMem').textContent = (d.memory_percent || 0).toFixed(1) + '%';
         document.getElementById('mBps').textContent = d.bitrate || '—';
@@ -1659,7 +1776,34 @@
       } catch (e) { showToast('请求失败'); }
     }
 
-    // ── 用户管理 ──
+    // ── 视频源切换 ──
+    async function loadSources() {
+      try {
+        const res = await fetch('/api/sources');
+        if (!res.ok) return;
+        const d = await res.json();
+        const sel = document.getElementById('sourceSelect');
+        sel.innerHTML = d.sources.map(name =>
+          '<option value="' + escAttr(name) + '"' + (name === d.active ? ' selected' : '') + '>' + escHtml(name) + '</option>'
+        ).join('');
+      } catch (e) { console.error(e); }
+    }
+
+    async function switchSource(name) {
+      try {
+        const res = await fetch('/api/sources', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name })
+        });
+        const d = await res.json();
+        showToast(d.msg);
+        if (d.ok) {
+          setTimeout(() => { fetchStatus(); fetchPlaylist(); }, 2000);
+        }
+      } catch (e) { showToast('请求失败'); }
+    }
+
     async function fetchUsers() {
       try {
         const res = await fetch('/api/users');
@@ -1945,6 +2089,15 @@
       document.getElementById('webcamX').value = webcam.x ?? 'W-w-20';
       document.getElementById('webcamY').value = webcam.y ?? 'H-h-20';
       document.getElementById('webcamOpacity').value = webcam.opacity ?? 1.0;
+
+      const trans = overlayData.transition || {};
+      document.getElementById('transType').value = trans.type || 'image';
+      document.getElementById('transPath').value = trans.path || '';
+      document.getElementById('transDuration').value = trans.duration || 5;
+      document.getElementById('transDurationGroup').style.display = (trans.type === 'video') ? 'none' : '';
+      document.getElementById('transType').onchange = function () {
+        document.getElementById('transDurationGroup').style.display = (this.value === 'video') ? 'none' : '';
+      };
 
       const clock = overlayData.clock || {};
       const clockEnabled = clock.enabled !== false;
@@ -2330,7 +2483,13 @@
         opacity: +document.getElementById('webcamOpacity').value
       };
 
-      return { logo, webcam, overlay: overlayData.overlay || [], clock, images: overlayData.images || [] };
+      return {
+        logo, webcam, overlay: overlayData.overlay || [], clock, images: overlayData.images || [], transition: {
+          type: document.getElementById('transType').value,
+          path: document.getElementById('transPath').value,
+          duration: +document.getElementById('transDuration').value,
+        }
+      };
     }
 
     async function saveOverlay() {
@@ -2373,6 +2532,7 @@
     init().then(() => {
       fetchStatus();
       fetchPlaylist();
+      loadSources();
       setInterval(fetchStatus, 3000);
       setInterval(fetchPlaylist, 10000);
     });

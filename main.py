@@ -45,24 +45,29 @@ def build_sources(config: dict) -> list:
     sources = []
     extensions = config.get("playlist", {}).get("extensions", [".mp4", ".mkv", ".flv"])
 
-    for src_cfg in config.get("sources", []):
+    for i, src_cfg in enumerate(config.get("sources", [])):
         src_type = src_cfg.get("type")
+        src_name = src_cfg.get("name", f"{src_type}_{i}")
 
         if src_type == "local":
-            sources.append(LocalSource(
+            src = LocalSource(
                 path=src_cfg["path"],
                 extensions=extensions,
-            ))
+            )
         elif src_type == "webdav":
-            sources.append(WebDAVSource(
+            src = WebDAVSource(
                 url=src_cfg["url"],
                 username=src_cfg["username"],
                 password=src_cfg["password"],
                 path=src_cfg.get("path", "/"),
                 extensions=extensions,
-            ))
+            )
         else:
             log.warning("未知视频源类型: %s", src_type)
+            continue
+
+        src.name = src_name
+        sources.append(src)
 
     if not sources:
         log.error("未配置任何视频来源，请检查 config.yaml")
