@@ -1,6 +1,6 @@
 services:
   live-stream:
-    image: 192.168.1.11:5000/live-stream:latest
+    image: 192.168.1.222:5000/live-stream:latest
     build: .
     container_name: live-stream
     restart: always
@@ -8,13 +8,13 @@ services:
       - "8088:8088"
     volumes:
       # 配置文件
-      - C:\Users\luotao\Downloads\live-stream\config.yaml:/app/config.yaml
+      - /opt/docker/live-stream/config.yaml:/app/config.yaml
       # 挂机视频所在文件夹
-      - C:\Users\luotao\Downloads\live-stream\webcam:/app/webcam
+      - /opt/docker/live-stream/webcam:/app/webcam
       # 存放台标和所有叠加图片的文件夹
-      - C:\Users\luotao\Downloads\live-stream\images:/app/images
-      - C:\Users\luotao\Downloads\live-stream\progress.json:/app/progress.json
-      - C:\Users\luotao\Downloads\live-stream\users.json:/app/users.json
+      - /opt/docker/live-stream/images:/app/images
+      - /opt/docker/live-stream/progress.json:/app/progress.json
+      - /opt/docker/live-stream/users.json:/app/users.json
     depends_on:
       - mediamtx
 
@@ -28,4 +28,4 @@ services:
       - "8888:8888" # HLS 查询端口
       - "8889:8889" # WebRTC 预览端口
     volumes:
-      - C:\Users\luotao\Downloads\live-stream\mediamtx.yml:/mediamtx.yml
+      - /opt/docker/live-stream/mediamtx.yml:/mediamtx.yml

@@ -458,6 +458,11 @@ class Streamer:
             "-r", str(fps), "-g", str(fps * 2), "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", a.get("bitrate", "192k"), "-ar", str(a.get("sample_rate", 44100)), "-ac", str(a.get("channels", 2)),
             "-mpegts_flags", "resend_headers",
+        ]
+        # 有 webcam 等持续流输入时，以主视频结束为准退出，确保自动跳转下一集
+        if webcam_input_idx is not None:
+            cmd += ["-shortest"]
+        cmd += [
             "-f", "mpegts", "pipe:1",
         ]
         
