@@ -1,6 +1,6 @@
 services:
   live-stream:
-    image: 192.168.1.222:5000/live-stream:latest
+    image: 127.0.0.1:5000/live-stream:latest
     build: .
     container_name: live-stream
     restart: always
@@ -24,9 +24,9 @@ services:
     container_name: live-stream-mediamtx
     restart: always
     ports:
-      - "8554:8554" # RTSP 推流接收端口
-      - "1935:1935" # RTMP 推流接收端口 (备用)
-      - "8888:8888" # HLS 查询端口
-      - "8889:8889" # WebRTC 预览端口
+      - "8554:8554" # RTSP
+      - "1935:1935" # RTMP (OBS 推流)
+      - "8888:8888" # HLS
+      - "8889:8889" # WebRTC
     volumes:
       - /opt/docker/live-stream/mediamtx.yml:/mediamtx.yml
