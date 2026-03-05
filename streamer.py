@@ -84,7 +84,7 @@ class Streamer:
         max_delay = self.resilience.get("max_retry_delay", 60)
         max_retries = self.resilience.get("max_retries", 0)
 
-        platform_names = {"bilibili": "B 站", "huya": "虎牙", "custom": "自定义"}
+        platform_names = {"bilibili": "B 站", "huya": "虎牙", "douyin": "抖音", "custom": "自定义"}
         platform_label = platform_names.get(self._active_platform, self._active_platform)
 
         log.info("=" * 50)

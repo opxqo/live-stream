@@ -1329,6 +1329,7 @@
               <select id="platformType" onchange="togglePlatformFields()">
                 <option value="bilibili">Bilibili (B站)</option>
                 <option value="huya">Huya (虎牙)</option>
+                <option value="douyin">Douyin (抖音)</option>
                 <option value="custom">第三方/自定义平台 (RTMP)</option>
               </select>
             </div>
@@ -1903,7 +1904,7 @@
     }
 
     // ── 推流平台设置 ──
-    let platformData = { stream: {}, bilibili: {}, huya: {}, custom: {} };
+    let platformData = { stream: {}, bilibili: {}, huya: {}, douyin: {}, custom: {} };
 
     async function loadPlatform() {
       try {
@@ -1914,6 +1915,7 @@
         // 如果后端以前没有这些字段，做一下容错预设
         platformData.bilibili = platformData.bilibili || {};
         platformData.huya = platformData.huya || {};
+        platformData.douyin = platformData.douyin || {};
         platformData.custom = platformData.custom || {};
         const stm = platformData.stream || {};
 
@@ -1923,7 +1925,7 @@
           const r_url = (stm.rtmp_url || '').toLowerCase();
           pType = 'bilibili';
           if (!r_url.includes('bilibili') && r_url) {
-            pType = r_url.includes('huya') ? 'huya' : 'custom';
+            pType = r_url.includes('huya') ? 'huya' : r_url.includes('douyin') ? 'douyin' : 'custom';
           }
         }
         document.getElementById('platformType').value = pType;
@@ -1940,6 +1942,9 @@
         if (pType === 'huya') {
           targetUrl = stm.rtmp_url || platformData.huya.rtmp_url || '';
           targetKey = stm.stream_key || platformData.huya.stream_key || '';
+        } else if (pType === 'douyin') {
+          targetUrl = stm.rtmp_url || platformData.douyin.rtmp_url || '';
+          targetKey = stm.stream_key || platformData.douyin.stream_key || '';
         } else if (pType === 'custom') {
           targetUrl = stm.rtmp_url || platformData.custom.rtmp_url || '';
           targetKey = stm.stream_key || platformData.custom.stream_key || '';
@@ -1968,6 +1973,9 @@
         if (pType === 'huya' && platformData.huya) {
           targetUrl = platformData.huya.rtmp_url || '';
           targetKey = platformData.huya.stream_key || '';
+        } else if (pType === 'douyin' && platformData.douyin) {
+          targetUrl = platformData.douyin.rtmp_url || '';
+          targetKey = platformData.douyin.stream_key || '';
         } else if (pType === 'custom' && platformData.custom) {
           targetUrl = platformData.custom.rtmp_url || '';
           targetKey = platformData.custom.stream_key || '';
@@ -1991,6 +1999,7 @@
         stream: { ...platformData.stream, active_platform: pType },
         bilibili: platformData.bilibili || {},
         huya: platformData.huya || {},
+        douyin: platformData.douyin || {},
         custom: platformData.custom || {}
       };
 
@@ -2016,6 +2025,9 @@
         if (pType === 'huya') {
           payload.huya.rtmp_url = r_url_input;
           payload.huya.stream_key = r_key_input;
+        } else if (pType === 'douyin') {
+          payload.douyin.rtmp_url = r_url_input;
+          payload.douyin.stream_key = r_key_input;
         } else if (pType === 'custom') {
           payload.custom.rtmp_url = r_url_input;
           payload.custom.stream_key = r_key_input;
@@ -2031,7 +2043,7 @@
         const d = await res.json();
         showToast(d.msg);
         // 刷新本地缓存
-        platformData = { stream: payload.stream, bilibili: payload.bilibili, huya: payload.huya, custom: payload.custom };
+        platformData = { stream: payload.stream, bilibili: payload.bilibili, huya: payload.huya, douyin: payload.douyin, custom: payload.custom };
       } catch (e) {
         showToast('保存平台配置遭遇网络错误');
       } finally {

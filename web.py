@@ -309,8 +309,9 @@ async def get_platform(user: dict = Depends(get_current_user)):
     stream = _config.get("stream", {}) if _config else {}
     bili = _config.get("bilibili", {}) if _config else {}
     huya = _config.get("huya", {}) if _config else {}
+    douyin = _config.get("douyin", {}) if _config else {}
     custom = _config.get("custom", {}) if _config else {}
-    return {"stream": stream, "bilibili": bili, "huya": huya, "custom": custom}
+    return {"stream": stream, "bilibili": bili, "huya": huya, "douyin": douyin, "custom": custom}
 
 
 @app.post("/api/platform")
@@ -330,6 +331,8 @@ async def save_platform(request: Request, admin: dict = Depends(require_admin)):
             _streamer._bili_cfg = body["bilibili"]
     if "huya" in body:
         _config["huya"] = body["huya"]
+    if "douyin" in body:
+        _config["douyin"] = body["douyin"]
     if "custom" in body:
         _config["custom"] = body["custom"]
 
